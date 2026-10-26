@@ -287,6 +287,7 @@ async function importEdc(msg, post) {
         onChunk: (p) => progress(post, 'Заявки 2026 (SQL № 4)', p, 0, 20),
       });
       fileInfo('requests', f, { encoding: info.encoding, delimiter: info.delimiter, rows: info.rows });
+      index.rawKeys.clear(); // нужны только во время чтения
       report.control.requests = {
         houseLevel: index.loaded['Дом'], entranceLevel: index.loaded['Подъезд'], otherLevel: index.otherLevel,
         noAddressKey: index.noAddressKey, houseLevelRequests: index.houseLevelTotal(),
@@ -294,6 +295,7 @@ async function importEdc(msg, post) {
       };
       if (index.otherLevel) report.warnings.push(`${index.otherLevel} строк заявок с неизвестным «Уровнем агрегации» пропущены.`);
       if (index.noAddressKey) report.warnings.push(`${index.noAddressKey} агрегатов заявок без ID адреса.`);
+      if (index.mergedVariants) report.warnings.push(`${index.mergedVariants} агрегатов заявок оказались тем же подъездом или адресом в другом написании (например, «1А» и «1а») и объединены, заявки сложены. Примеры: ${index.mergedExamples.join('; ')}.`);
     }
 
     // Хэши предыдущего снимка для предпросмотра изменений

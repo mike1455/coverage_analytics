@@ -157,3 +157,27 @@ test('округа: разные написания', () => {
   assert.equal(areaKey('Савёлки'), 'савелки');
   assert.equal(areaKey('муниципальный округ Выхино-Жулебино'), areaKey('Выхино-Жулебино'));
 });
+
+test('заявки: тот же подъезд в другом написании объединяется, повтор строки останавливает импорт', async () => {
+  const { RequestIndex } = await import('../core/edc.js');
+  const { readCsv, FIX } = await import('./helpers.mjs');
+  const req = readCsv(join(FIX, '03_заявки_2026.csv'));
+  const col = (name) => req.header.indexOf(name);
+  const base = req.rows.find((r) => r[col('Тип ключа подъезда')] === 'Только номер подъезда');
+  assert.ok(base, 'в фикстуре есть подъездный агрегат по номеру');
+  const row = (key, total) => { const r = [...base]; r[col('Ключ подъезда для сопоставления')] = key; r[col('Заявок 2026 всего')] = String(total); return r; };
+  const index = new RequestIndex();
+  index.setHeader(req.header);
+  index.addRow(row('NUMBER:1а', 3), 2);
+  index.addRow(row('NUMBER: 1А ', 4), 3); // тот же подъезд: другой регистр и пробелы
+  assert.equal(index.mergedVariants, 1);
+  assert.equal(index.recs.length, 1);
+  assert.equal(index.recs[0].ek, '1а');
+  assert.equal(index.recs[0].n[0], 7, 'заявки сложены');
+  assert.throws(() => index.addRow(row('NUMBER:1а', 3), 4), /повторяет ключ более ранней строки 2/);
+  // та же строка, но с другим УНОМ из заявок: SQL разбил агрегат, заявки складываются
+  const other = row('NUMBER:1а', 5); other[col('УНОМ из заявок')] = '9999999';
+  index.addRow(other, 5);
+  assert.equal(index.recs[0].n[0], 12);
+  assert.match(String(index.recs[0].unom), /9999999/);
+});

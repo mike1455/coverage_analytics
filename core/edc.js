@@ -4,7 +4,7 @@
 
 import { resolveColumns, getter } from './headers.js';
 import {
-  normUuid, normUnom, normFias, parseBool, parseCount, lowerYo, recordHash, dateKey, ImportError,
+  normUuid, normUnom, normFias, parseBool, parseCount, lowerYo, recordHash, dateKey, ImportError, fnv1a,
 } from './util.js';
 import { ob, htNorm } from './compact.js';
 
@@ -182,6 +182,9 @@ export class RequestIndex {
     this.noAddressKey = 0;
     this.byKeyType = new Map();
     this.cols = null;
+    this.rawKeys = new Map(); // ключ → отпечаток всей строки и её номер (чтобы отличить повтор строки от другого написания)
+    this.mergedVariants = 0;
+    this.mergedExamples = [];
   }
 
   setHeader(header) {
@@ -213,11 +216,28 @@ export class RequestIndex {
     if (!ak) this.noAddressKey++;
     const n = STATS_FIELDS.map((f, i) => parseCount(g(row, f), STATS_COLUMNS[i], line));
     const key = level === 'Дом' ? `${at}\u0001${ak}` : `${at}\u0001${ak}\u0001${et}\u0001${ek}`;
+    const joined = row.join('\u0001');
+    const fp = `${fnv1a(joined)}.${joined.length}`;
     const m = this.map[level];
     if (m.has(key)) {
-      throw new ImportError(`Дублирующаяся агрегированная строка заявок в CSV, строка ${line}: уровень=${level}, ` +
-        `тип адреса=${at}, ID=${ak}, тип подъезда=${et}, ключ=${ek}. Перед объединением удалите дубликаты / проверьте SQL.`);
+      const [prevFp, prevLine] = this.rawKeys.get(key) || [];
+      if (prevFp === fp) {
+        throw new ImportError(`Строка ${line} в CSV заявок полностью повторяет ключ более ранней строки ${prevLine}: уровень=${level}, ` +
+          `тип адреса=${at}, ID=${ak}, тип подъезда=${et}, ключ=${ek}. Похоже, файл содержит одну и ту же строку дважды: выгрузите SQL № 4 заново.`);
+      }
+      // Тот же подъезд или адрес, записанный иначе («1А» и «1а», лишний пробел, регистр UUID)
+      // или разбитый SQL на несколько строк (например, по разным УНОМ): заявки складываются
+      const r = this.recs[m.get(key)];
+      for (let i = 0; i < n.length; i++) r.n[i] += n[i];
+      const last = ob(g(row, 'last'));
+      if (last > r.last) r.last = last;
+      const un = ob(g(row, 'unoms'));
+      if (un && !String(r.unom).split(/[,;]\s*/).includes(un)) r.unom = r.unom ? `${r.unom}, ${un}` : un;
+      this.mergedVariants++;
+      if (this.mergedExamples.length < 10) this.mergedExamples.push(`${level === 'Дом' ? ak : ek}: «${(level === 'Дом' ? g(row, 'akey') : g(row, 'ekey')).trim()}»`);
+      return;
     }
+    this.rawKeys.set(key, [fp, line]);
     const idx = this.recs.length;
     this.recs.push({ level, at, ak, et, ek, unom: ob(g(row, 'unoms')), last: ob(g(row, 'last')), n });
     m.set(key, idx);

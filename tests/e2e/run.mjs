@@ -314,7 +314,7 @@ function prepareSourceFolder() {
     await page.waitForFunction(() => document.querySelectorAll('.modal .file-item').length === 1);
     await page.click('text=Проверить и показать изменения');
     await page.waitForSelector('.modal :text("Импорт остановлен")', { timeout: 60000 });
-    assert.match(await page.evaluate(() => document.querySelector('.modal').innerText), /Дублирующаяся агрегированная строка/);
+    assert.match(await page.evaluate(() => document.querySelector('.modal').innerText), /повторяет ключ более ранней строки/);
     await page.screenshot({ path: join(OUT, '02b_import_error.png') });
     await page.click('.modal button:has-text("Закрыть")');
     await page.waitForFunction(() => !document.querySelector('.modal-back'));
