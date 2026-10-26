@@ -9,6 +9,7 @@ import { getSourcesState, sourcesSummary, openSourcesDialog } from './sources.js
 import { MapView } from './map.js';
 import { basemapPanel, basemapState, basemapShort, refreshBasemap, onBasemap } from './basemap.js';
 import { openGeocodeDialog } from './geocode.js';
+import { getJson, postJson, waitJob } from './api.js';
 import { openCard, openEdcCard, closeCard, nominatimConsent } from './card.js';
 import { barChart, stackBar, legend, okrugTiles, hideTip } from './charts.js';
 import {
@@ -20,7 +21,7 @@ import { Q } from './core/edc.js';
 import { normUnom, isUuid, lowerYo } from './core/util.js';
 import { toCsv } from './core/csv.js';
 import {
-  nominatimSearch, accuracyOf, centroidOf, parseGeoFile, exportGeoJson, fetchBoundaries, annotateBoundaries,
+  nominatimSearch, accuracyOf, centroidOf, parseGeoFile, exportGeoJson, annotateBoundaries,
 } from './geo.js';
 
 const VIEWS = ['map', 'heat', 'rating', 'houses', 'import'];
@@ -84,6 +85,11 @@ async function boot() {
     render();
   });
   await refreshBasemap();
+  // Границы уже скачаны на диск, а в браузере их нет (например, данные сайта очищены): подхватить без интернета
+  if (!app.state.boundaries.okrug || !app.state.boundaries.area) {
+    const bst = await getJson('api/boundaries').catch(() => null);
+    if (bst && ((!app.state.boundaries.okrug && bst.okrug.exists) || (!app.state.boundaries.area && bst.area.exists))) await applyBoundaryFiles(bst).catch(() => null);
+  }
   const v = location.hash.slice(1);
   go(VIEWS.includes(v) ? v : 'map', false);
 }
@@ -400,7 +406,7 @@ function renderMapView() {
       h('div', { class: 'actions' },
         h('button', { class: 'btn btn-sm btn-primary', onclick: () => openGeocodeDialog(app, { autostart: true }) }, icon('pin', 14), 'Найти координаты всех домов'),
         h('button', { class: 'btn btn-sm', onclick: () => go('import') }, icon('upload', 14), 'Импорт координат'),
-        !app.state.boundaries.okrug ? h('button', { class: 'btn btn-sm', onclick: () => loadBoundaries('okrug') }, icon('layers', 14), 'Границы округов (OSM)') : null));
+        !app.state.boundaries.okrug ? h('button', { class: 'btn btn-sm', onclick: () => loadBoundaries() }, icon('layers', 14), 'Границы округов и районов') : null));
   }
   app.map.update(ctx);
   // Боковая панель: схема округов + структура покрытия
@@ -483,7 +489,7 @@ function dataNotesCard(k, rows) {
     h('div', { class: 'small ink2' }, `Срез МЖИ: ${fmt.date(st.snapMji && st.snapMji.dataDate)}, ЕДЦ: ${st.snapEdc ? fmt.date(st.snapEdc.dataDate) : 'нет'}.`),
     h('div', { class: 'small ink2' }, `На карте ${fmt.int(rows.filter((r) => st.geo.has(r.u)).length)} из ${fmt.int(rows.length)} МКД (только дома с сохранённой геопозицией).`),
     rows.some((r) => !st.geo.has(r.u)) ? h('button', { class: 'btn btn-sm btn-primary btn-block', onclick: () => openGeocodeDialog(app, { autostart: true }) }, icon('pin', 14), 'Найти координаты всех домов') : null,
-    !st.boundaries.okrug ? h('div', { class: 'small' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); loadBoundaries('okrug'); } }, 'Загрузить границы округов из OSM'), ' для заливки на карте.') : null);
+    !st.boundaries.okrug || !st.boundaries.area ? h('button', { class: 'btn btn-sm btn-block', onclick: () => loadBoundaries() }, icon('layers', 14), 'Загрузить границы округов и районов') : null);
 }
 
 function scopeLabel() {
@@ -940,11 +946,11 @@ function boundariesCard() {
   return h('div', { class: 'card stack' }, h('div', { class: 'card-head' }, h('h3', null, 'Границы для заливки карты')),
     h('div', { class: 'small ink2' }, `Округа: ${info(b.okrug)}`), h('div', { class: 'small ink2' }, `Районы: ${info(b.area)}`),
     h('div', { class: 'actions-row' },
-      h('button', { class: 'btn btn-sm', onclick: () => loadBoundaries('okrug') }, icon('layers', 14), 'Округа из OSM'),
-      h('button', { class: 'btn btn-sm', onclick: () => loadBoundaries('area') }, icon('layers', 14), 'Районы из OSM'),
+      h('button', { class: `btn ${b.okrug && b.area ? '' : 'btn-primary'}`, onclick: () => loadBoundaries() }, icon('layers', 16), b.okrug && b.area ? 'Обновить границы' : 'Загрузить границы округов и районов')),
+    h('div', { class: 'actions-row' },
       h('button', { class: 'btn btn-sm btn-ghost', onclick: () => fo.click() }, 'Округа из GeoJSON'),
       h('button', { class: 'btn btn-sm btn-ghost', onclick: () => fa.click() }, 'Районы из GeoJSON')), fo, fa,
-    h('div', { class: 'small muted' }, 'OSM: запрос к Overpass API (только границы, данные МЖИ/ЕДЦ не отправляются). Названия сопоставляются с округами и районами МЖИ; несопоставленные полигоны рисуются пунктиром.'));
+    h('div', { class: 'small muted' }, 'Границы берутся из OpenStreetMap: список через Overpass API (несколько серверов), полигоны через Nominatim, при сбое повтор и запасной путь. Сохраняются в data/local/osm и в браузере. Названия сопоставляются с округами и районами МЖИ; несопоставленные полигоны рисуются пунктиром.'));
 }
 
 function backupCard() {
@@ -1183,14 +1189,38 @@ async function batchGeocodeDialog() {
   });
 }
 
-async function loadBoundaries(kind) {
-  const m = modal({ title: kind === 'okrug' ? 'Границы округов из OSM' : 'Границы районов из OSM', body: h('div', { class: 'stack' }, h('div', { class: 'ink2' }, 'Запрос к Overpass API... Это может занять до минуты.'), h('div', { class: 'progress' }, h('i', { style: { width: '50%' } }))), actions: [], dismissable: false });
+/** Границы округов и районов одной кнопкой: serve.py скачивает их в data/local/osm, приложение сохраняет у себя. */
+async function loadBoundaries() {
+  const stage = h('div', { class: 'small ink2' }, 'Подготовка');
+  const m = modal({
+    title: 'Границы округов и районов', dismissable: false, actions: [],
+    body: h('div', { class: 'stack', style: { gap: '10px' } }, h('div', { class: 'ink2' }, 'Загрузка из OpenStreetMap, обычно меньше минуты.'), stage, h('div', { class: 'progress indeterminate' }, h('i', { style: { width: '30%' } }))),
+  });
   try {
-    const fc = await fetchBoundaries(kind === 'okrug' ? 5 : 8);
-    await saveBoundaries(fc, kind, 'OSM Overpass (© участники OpenStreetMap, ODbL)');
+    const areas = [...new Set(app.state.rows.map((r) => r.area).filter(Boolean))];
+    await postJson('api/boundaries/download', { areas, email: app.settings.nominatimEmail || '' });
+    const st = await waitJob('api/boundaries', (s) => { stage.textContent = (s.job && s.job.stage) || 'Загрузка'; });
+    if (st.job.state !== 'done') throw new Error(st.job.message || 'границы не получены');
+    const n = await applyBoundaryFiles(st);
+    toast(`Границы загружены: округов ${n.okrug}, районов ${n.area}${n.unmatched ? `; без сопоставления с МЖИ: ${n.unmatched}` : ''}`, 'ok', 7000);
   } catch (e) {
-    toast(`Не удалось загрузить границы: ${e.message}`, 'error', 8000);
+    toast(`Не удалось загрузить границы: ${e.message}. Повторите позже или загрузите GeoJSON вручную.`, 'error', 9000);
   } finally { m.close(); }
+}
+
+/** Прочитать сохранённые файлы границ (после загрузки или если данные браузера очищены). */
+async function applyBoundaryFiles(st) {
+  const n = { okrug: 0, area: 0, unmatched: 0 };
+  for (const kind of ['okrug', 'area']) {
+    const f = st[kind];
+    if (!f || !f.exists) continue;
+    const fc = await getJson(`${f.url}?v=${f.mtime || Date.now()}`);
+    const r = await saveBoundaries(fc, kind, 'OpenStreetMap (© участники OpenStreetMap, ODbL)', { quiet: true });
+    n[kind] = fc.features.length;
+    n.unmatched += r.unmatched.length;
+  }
+  render();
+  return n;
 }
 
 async function importBoundariesFile(file, kind) {
@@ -1203,15 +1233,18 @@ async function importBoundariesFile(file, kind) {
   } catch (e) { toast(`Ошибка GeoJSON: ${e.message}`, 'error', 8000); }
 }
 
-async function saveBoundaries(fc, kind, source) {
+async function saveBoundaries(fc, kind, source, { quiet = false } = {}) {
   const areas = [...new Set(app.state.rows.map((r) => r.area).filter(Boolean))];
   const { unmatched } = annotateBoundaries(fc, kind, areas);
   if (!fc.features.length) throw new Error('В ответе нет полигонов');
   await setMeta(kind === 'okrug' ? 'boundaries_okrug' : 'boundaries_area', { geojson: fc, source, fetchedAt: new Date().toISOString(), unmatched });
   app.state.boundaries = { okrug: await getMeta('boundaries_okrug'), area: await getMeta('boundaries_area') };
   if (kind === 'area') app.map.layerOn.area = true;
-  toast(`Загружено полигонов: ${fc.features.length}${unmatched.length ? `, без сопоставления: ${unmatched.length}` : ''}`, unmatched.length ? 'info' : 'ok', 7000);
-  render();
+  if (!quiet) {
+    toast(`Загружено полигонов: ${fc.features.length}${unmatched.length ? `, без сопоставления: ${unmatched.length}` : ''}`, unmatched.length ? 'info' : 'ok', 7000);
+    render();
+  }
+  return { unmatched };
 }
 
 // ---------------------------------------------------------------- резервные копии

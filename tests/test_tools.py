@@ -855,5 +855,158 @@ class YandexApi(unittest.TestCase):
         self.assertEqual(st, 400)
 
 
+OB = load("osm_boundaries_mod", ROOT / "tools" / "osm_boundaries.py")
+
+SQUARE = [[37.50, 55.70], [37.60, 55.70], [37.60, 55.80], [37.50, 55.80], [37.50, 55.70]]
+
+
+def overpass_boundaries(level):
+    """Ответы Overpass для границ: список (out tags) и геометрия (out geom) из двух линий с общими концами."""
+    names = {"5": ["Центральный административный округ", "Северный административный округ"],
+             "8": ["район Арбат", "поселение Филимонковское"]}[level]
+    return [{"type": "relation", "id": int(level) * 100 + i, "tags": {"name": n, "admin_level": level, "boundary": "administrative"},
+             "members": [
+                 {"type": "way", "role": "outer", "geometry": [{"lon": x, "lat": y} for x, y in SQUARE[:3]]},
+                 {"type": "way", "role": "outer", "geometry": [{"lon": x, "lat": y} for x, y in reversed(SQUARE[2:])]},
+             ]} for i, n in enumerate(names)]
+
+
+class FakeOsmServices:
+    """Overpass (POST) и Nominatim (GET /lookup, /search) на одном локальном порту."""
+
+    def __init__(self, overpass_ok=True, nominatim_ok=True):
+        self.log = []
+        fake = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def reply(self, code, obj):
+                data = json.dumps(obj).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                q = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8"))["data"][0]
+                level = "5" if '"admin_level"="5"' in q else "8"
+                kind = "geom" if "out geom" in q else "list"
+                fake.log.append(("overpass", kind, level))
+                if not overpass_ok:
+                    return self.reply(502, {})
+                els = overpass_boundaries(level)
+                if kind == "list":
+                    els = [{"type": e["type"], "id": e["id"], "tags": e["tags"]} for e in els]
+                self.reply(200, {"elements": els})
+
+            def do_GET(self):
+                u = urllib.parse.urlsplit(self.path)
+                q = urllib.parse.parse_qs(u.query)
+                fake.log.append(("nominatim", u.path.rsplit("/", 1)[-1], q.get("osm_ids", q.get("q", [""]))[0]))
+                if not nominatim_ok:
+                    return self.reply(503, {})
+                geom = {"type": "Polygon", "coordinates": [SQUARE]}
+                if u.path.endswith("/lookup"):
+                    ids = [int(x[1:]) for x in q["osm_ids"][0].split(",")]
+                    feats = [{"type": "Feature", "properties": {"osm_type": "relation", "osm_id": i}, "geometry": geom} for i in ids]
+                else:
+                    text = q["q"][0]
+                    ok = text.startswith(("район Арбат", "поселение Сосенское")) or "административный округ" in text
+                    feats = [{"type": "Feature", "properties": {"category": "boundary", "type": "administrative", "osm_id": 1}, "geometry": geom}] if ok else []
+                self.reply(200, {"type": "FeatureCollection", "features": feats})
+
+            def log_message(self, *a):
+                pass
+        self.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.overpass, self.nominatim = base + "/api/interpreter", base + "/nominatim"
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class OsmBoundaries(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_download(self, fake, areas=None):
+        prog = BM.Progress()
+        OB.download(prog, out_dir=self.dir, areas=areas, endpoints=[fake.overpass], nominatim=fake.nominatim, pause=0)
+        return prog.snapshot()
+
+    def read(self, kind):
+        return json.loads(OB.out_file(kind, self.dir).read_text(encoding="utf-8"))
+
+    def test_rings_from_lines(self):
+        a = [(0, 0), (1, 0), (1, 1)]
+        b = [(0, 0), (0, 1), (1, 1)]  # обратный порядок второй линии
+        rings = OB.join_rings([a, b])
+        self.assertEqual(len(rings), 1)
+        self.assertEqual(rings[0][0], rings[0][-1])
+        self.assertEqual(len(rings[0]), 5)
+        self.assertEqual(OB.join_rings([[(0, 0), (1, 0)]]), [], "незамкнутая линия не становится контуром")
+
+    def test_list_then_nominatim_polygons(self):
+        fake = FakeOsmServices()
+        try:
+            st = self.run_download(fake)
+            self.assertEqual(st["state"], "done", st)
+            okrug, area = self.read("okrug"), self.read("area")
+            self.assertEqual([f["properties"]["name"] for f in okrug["features"]], ["Центральный административный округ", "Северный административный округ"])
+            self.assertEqual(area["features"][1]["properties"]["name"], "поселение Филимонковское")
+            self.assertEqual(area["features"][0]["geometry"]["type"], "Polygon")
+            self.assertNotIn(("overpass", "geom", "5"), fake.log, "тяжёлый запрос геометрии не нужен, если ответил Nominatim")
+            self.assertEqual(sum(1 for x in fake.log if x[:2] == ("nominatim", "lookup")), 2)
+            self.assertEqual(OB.status(self.dir)["area"]["exists"], True)
+        finally:
+            fake.close()
+
+    def test_overpass_geometry_when_nominatim_down(self):
+        fake = FakeOsmServices(nominatim_ok=False)
+        try:
+            st = self.run_download(fake)
+            self.assertEqual(st["state"], "done", st)
+            g = self.read("okrug")["features"][0]["geometry"]
+            self.assertEqual(g["type"], "Polygon")
+            self.assertEqual(g["coordinates"][0][0], g["coordinates"][0][-1])
+            self.assertIn(("overpass", "geom", "8"), fake.log)
+        finally:
+            fake.close()
+
+    def test_names_when_overpass_down(self):
+        fake = FakeOsmServices(overpass_ok=False)
+        orig = OB.time.sleep
+        OB.time.sleep = lambda s: None  # повторы Overpass без ожидания
+        try:
+            st = self.run_download(fake, areas=["Арбат", "Сосенское", "Неизвестный"])
+            self.assertEqual(st["state"], "done", st)
+            self.assertEqual(len(self.read("okrug")["features"]), 12)
+            self.assertEqual([f["properties"]["name"] for f in self.read("area")["features"]], ["Арбат", "Сосенское"])
+            self.assertIn(("nominatim", "search", "поселение Сосенское, Москва"), fake.log)
+        finally:
+            OB.time.sleep = orig
+            fake.close()
+
+    def test_everything_down_keeps_old_files(self):
+        fake = FakeOsmServices(overpass_ok=False, nominatim_ok=False)
+        OB.out_file("okrug", self.dir).parent.mkdir(parents=True, exist_ok=True)
+        OB.out_file("okrug", self.dir).write_text('{"old":1}', encoding="utf-8")
+        orig = OB.time.sleep
+        OB.time.sleep = lambda s: None
+        try:
+            st = self.run_download(fake)
+            self.assertEqual(st["state"], "error")
+            self.assertEqual(json.loads(OB.out_file("okrug", self.dir).read_text(encoding="utf-8")), {"old": 1})
+        finally:
+            OB.time.sleep = orig
+            fake.close()
+
+
 if __name__ == "__main__":
     unittest.main()

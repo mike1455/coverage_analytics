@@ -55,6 +55,12 @@ test('границы OSM (Overpass out geom) → полигоны с привя�
   const areas = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: { name: 'район Арбат' }, geometry: fc.features[0].geometry }] };
   annotateBoundaries(areas, 'area', ['Арбат', 'Хамовники']);
   assert.equal(areas.features[0].properties._area, 'Арбат');
+  // окончания в OSM и МЖИ могут отличаться: «поселение Филимонковское» и «Филимонковский»
+  const g = fc.features[0].geometry;
+  const ns = { type: 'FeatureCollection', features: ['поселение Филимонковское', 'поселение Краснопахорское', 'городской округ Троицк', 'район Северный'].map((name) => ({ type: 'Feature', properties: { name }, geometry: g })) };
+  const r = annotateBoundaries(ns, 'area', ['Филимонковский', 'Краснопахорский', 'Троицк', 'Северный', 'Северное Бутово']);
+  assert.deepEqual(ns.features.map((f) => f.properties._area), ['Филимонковский', 'Краснопахорский', 'Троицк', 'Северный']);
+  assert.deepEqual(r.unmatched, []);
 });
 
 test('упрощение контура сохраняет замыкание и центр', () => {

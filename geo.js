@@ -1,6 +1,6 @@
 // Геоданные: геокодирование (OSM Nominatim - только по явному действию пользователя и с его согласия),
-// границы округов/районов (OSM Overpass или GeoJSON-файл), импорт/экспорт координат.
-// Ничего не геокодируется автоматически и массово: политика Nominatim - не более 1 запроса в секунду.
+// границы округов/районов (сопоставление с МЖИ, GeoJSON-файл), импорт/экспорт координат.
+// Nominatim используется только для отдельных домов и района по кнопке: его политика - не более 1 запроса в секунду.
 
 import { normUnom, str } from './core/util.js';
 import { normOkrug, areaKey } from './core/okrugs.js';
@@ -99,24 +99,7 @@ export function accuracyOf(c) {
   return `приблизительно (${c.cls || ''}/${c.type || ''})`;
 }
 
-// ---------- границы (Overpass) ----------
-
-export const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
-
-export function overpassQuery(level) {
-  return `[out:json][timeout:180];area["ISO3166-2"="RU-MOW"]->.msk;` +
-    `(relation(area.msk)["boundary"="administrative"]["admin_level"="${level}"];);out geom;`;
-}
-
-export async function fetchBoundaries(level) {
-  const res = await fetch(OVERPASS_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-    body: 'data=' + encodeURIComponent(overpassQuery(level)),
-  });
-  if (!res.ok) throw new Error(`Overpass API ответил ${res.status}. Повторите позже или загрузите GeoJSON вручную.`);
-  return osmToBoundaries(await res.json());
-}
+// ---------- границы (OSM) ----------
 
 /** Overpass JSON → FeatureCollection полигонов (osmtogeojson), только (Multi)Polygon. */
 export function osmToBoundaries(osmJson, toGeo = (typeof window !== 'undefined' ? window.osmtogeojson : null)) {
@@ -127,8 +110,16 @@ export function osmToBoundaries(osmJson, toGeo = (typeof window !== 'undefined' 
 }
 
 /** Привязка полигонов к округам/районам МЖИ по названию. */
+// «Филимонковское» в OSM и «Филимонковский» в МЖИ: сравнение без окончаний прилагательных
+const stem = (k) => k.split(' ').map((w) => w.replace(/(ское|ский|ская|ские|ое|ий|ый|ая|ой)$/, '')).join(' ');
+
 export function annotateBoundaries(fc, kind, knownAreas = []) {
   const areaMap = new Map(knownAreas.map((a) => [areaKey(a), a]));
+  const stemMap = new Map();
+  for (const a of knownAreas) {
+    const k = stem(areaKey(a));
+    stemMap.set(k, stemMap.has(k) && stemMap.get(k) !== a ? null : a); // неоднозначная основа не используется
+  }
   const unmatched = [];
   for (const f of fc.features) {
     const p = f.properties || (f.properties = {});
@@ -141,6 +132,7 @@ export function annotateBoundaries(fc, kind, knownAreas = []) {
     } else {
       let area = '';
       for (const n of names) { const k = areaKey(n); if (areaMap.has(k)) { area = areaMap.get(k); break; } }
+      if (!area) for (const n of names) { const a = stemMap.get(stem(areaKey(n))); if (a) { area = a; break; } }
       p._area = area;
       if (!area) unmatched.push(names[0] || '(без названия)');
     }

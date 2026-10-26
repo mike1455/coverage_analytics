@@ -8,6 +8,7 @@
   * скачивает адреса зданий Москвы из OpenStreetMap для поиска координат домов (tools/osm_addresses.py)
     и сохраняет найденные координаты в data/local/geocoded_houses.csv;
   * ищет оставшиеся дома через Яндекс Геокодер, если указан ключ API (tools/yandex_geocoder.py);
+  * скачивает границы округов и районов Москвы для заливки карты (tools/osm_boundaries.py);
   * слушает только 127.0.0.1 (данные не видны в локальной сети);
   * правильные MIME-типы для .js/.mjs/.pmtiles/.geojson и отключённый кэш для файлов приложения;
   * локальный API «Папка с выгрузками»: приложение читает ваши файлы прямо с диска по путям из
@@ -35,6 +36,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import basemap  # noqa: E402
 import osm_addresses  # noqa: E402
 import yandex_geocoder  # noqa: E402
+import osm_boundaries  # noqa: E402
 
 DEFAULT_CONFIG = ROOT / "config" / "sources.default.json"
 LOCAL_CONFIG = Path(os.environ.get("MCA_SOURCES_CONFIG") or (ROOT / "config" / "sources.local.json"))
@@ -54,6 +56,7 @@ ADDRESSES_FILE = osm_addresses.OUTPUT
 GEOCODED_FILE = ROOT / "data" / "local" / "geocoded_houses.csv"
 YANDEX_SETTINGS = Path(os.environ.get("MCA_GEOCODER_CONFIG") or yandex_geocoder.SETTINGS)
 YANDEX_CACHE = yandex_geocoder.CACHE
+BOUNDARIES_DIR = osm_boundaries.OUT_DIR
 
 
 # ---------------------------------------------------------------- настройки источников
@@ -299,6 +302,35 @@ def start_yandex(data):
     return True
 
 
+BND_JOB = basemap.Progress()
+_bnd_thread = None
+
+
+def boundaries_state():
+    st = osm_boundaries.status(BOUNDARIES_DIR)
+    st["job"] = BND_JOB.snapshot()
+    return st
+
+
+def start_boundaries(data):
+    global _bnd_thread
+    data = data if isinstance(data, dict) else {}
+    areas = [str(a)[:200] for a in (data.get("areas") or []) if isinstance(a, str)][:1000]
+    email = str(data.get("email") or "")[:200]
+    env = os.environ.get("MCA_OVERPASS_URL")
+    with _basemap_lock:
+        if _bnd_thread and _bnd_thread.is_alive():
+            return False
+        BND_JOB.reset()
+        BND_JOB.set(state="running", stage="Подготовка")
+        kwargs = {"out_dir": BOUNDARIES_DIR, "areas": areas, "email": email}
+        if env:  # свои или тестовые серверы: без пауз
+            kwargs.update(endpoints=[u for u in env.split(",") if u.startswith(("http://", "https://"))], pause=0)
+        _bnd_thread = threading.Thread(target=osm_boundaries.download, args=(BND_JOB,), kwargs=kwargs, daemon=True)
+        _bnd_thread.start()
+    return True
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -362,7 +394,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         route = urllib.parse.urlsplit(self.path).path
         if route not in ("/api/sources", "/api/open-folder", "/api/basemap/download", "/api/basemap/cancel",
                          "/api/addresses/download", "/api/addresses/cancel", "/api/geocoded",
-                         "/api/yandex/settings", "/api/yandex/start", "/api/yandex/cancel"):
+                         "/api/yandex/settings", "/api/yandex/start", "/api/yandex/cancel",
+                         "/api/boundaries/download", "/api/boundaries/cancel"):
             return self._json(404, {"error": "Нет такого метода"})
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json(415, {"error": "Нужен Content-Type: application/json"})
@@ -375,6 +408,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if route == "/api/geocoded":
                 return self._json(200, save_geocoded(data))
+            if route == "/api/boundaries/cancel":
+                BND_JOB.cancel.set()
+                return self._json(200, boundaries_state())
+            if route == "/api/boundaries/download":
+                if not start_boundaries(data):
+                    return self._json(409, {"error": "Загрузка границ уже идёт", **boundaries_state()})
+                return self._json(202, boundaries_state())
             if route == "/api/yandex/settings":
                 yandex_geocoder.save_settings(data if isinstance(data, dict) else {}, YANDEX_SETTINGS)
                 return self._json(200, yandex_state())
@@ -437,6 +477,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(200, addresses_state())
         if path == "/api/yandex":
             return self._json(200, yandex_state())
+        if path == "/api/boundaries":
+            return self._json(200, boundaries_state())
         if path == "/api/yandex/results":
             return self._json(200, {"results": dict(getattr(YA_JOB, "results", {}) or {})})
         m = re.fullmatch(r"/api/source/([a-z]+)", path)

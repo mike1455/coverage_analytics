@@ -11,33 +11,10 @@ import { putMany } from './storage.js';
 import { buildIndex, matchAddress } from './core/addrmatch.js';
 import { toCsv } from './core/csv.js';
 import { inMoscow } from './geo.js';
+import { getJson, postJson, waitJob } from './api.js';
 
 const KEEP = new Set(['manual', 'verified', 'imported', 'auto', 'yandex']); // поиск по OSM эти точки не трогает
 const tick = () => new Promise((r) => setTimeout(r, 0));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function getJson(url) {
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-
-async function postJson(url, body = {}) {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok && r.status !== 409) throw new Error(data.error || `HTTP ${r.status}`);
-  return data;
-}
-
-/** Ждать окончания фоновой задачи serve.py, сообщая её ход. */
-async function waitJob(url, onTick) {
-  for (;;) {
-    const st = await getJson(url);
-    onTick(st);
-    if (!st.job || st.job.state !== 'running') return st;
-    await sleep(1000);
-  }
-}
 
 export const addressesState = () => getJson('api/addresses').then((s) => ({ api: true, ...s })).catch(() => ({ api: false }));
 export const yandexState = () => getJson('api/yandex').then((s) => ({ api: true, ...s })).catch(() => ({ api: false }));

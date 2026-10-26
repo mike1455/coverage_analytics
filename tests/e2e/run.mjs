@@ -7,7 +7,7 @@
 // Скриншоты: tests/e2e/output/
 import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, copyFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, copyFileSync, mkdtempSync, rmSync, rmdirSync, existsSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,7 @@ import { ROOT, FIX, readCsv, mergeRaw } from '../helpers.mjs';
 import { parseMji } from '../../core/mji.js';
 import { Joiner, kpiOf } from '../../analytics.js';
 import { parseAddress, streetBag } from '../../core/addrmatch.js';
+import { OKRUGS } from '../../core/okrugs.js';
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -64,6 +65,8 @@ function rangeServer(file) {
 // (другой порядок слов, «Ё», заглавные буквы в номере). Часть домов пропущена, один адрес неоднозначен.
 const ADDRESSES = join(ROOT, 'data', 'local', 'osm', 'moscow_addresses.json');
 const GEOCODED = join(ROOT, 'data', 'local', 'geocoded_houses.csv');
+const BOUNDS = ['okrug', 'area'].map((k) => join(ROOT, 'data', 'local', 'osm', `boundaries_${k}.geojson`));
+const BOUNDS_TEST = BOUNDS.every((f) => !existsSync(f));
 const GEOCODE_TEST = !existsSync(ADDRESSES) && !existsSync(GEOCODED) && !existsSync(join(ROOT, 'data', 'local', 'yandex_geocoder_cache.json'));
 function overpassElements() {
   const m = readCsv(join(FIX, 'mji_synthetic.csv'));
@@ -103,12 +106,33 @@ function yandexServer(streetOnly) {
     srv.listen(0, '127.0.0.1', () => res(srv));
   });
 }
-function overpassServer(elements) {
+// Границы: Overpass отдаёт список (12 округов и районы синтетического реестра), Nominatim /lookup отдаёт полигоны
+function boundaryRelations(areas) {
+  const okr = OKRUGS.map((o, i) => ({ type: 'relation', id: 500 + i, tags: { name: o.full, admin_level: '5', boundary: 'administrative' } }));
+  const ar = areas.map((a, i) => ({ type: 'relation', id: 800 + i, tags: { name: `район ${a}`, admin_level: '8', boundary: 'administrative' } }));
+  return { 5: okr, 8: ar };
+}
+function osmServer(elements, relations) {
   const body = JSON.stringify({ version: 0.6, elements });
   return new Promise((res) => {
     const srv = http.createServer((req, resp) => {
-      req.resume();
-      req.on('end', () => { resp.writeHead(200, { 'Content-Type': 'application/json' }); resp.end(body); });
+      let data = '';
+      req.on('data', (c) => { data += c; });
+      req.on('end', () => {
+        resp.writeHead(200, { 'Content-Type': 'application/json' });
+        const u = new URL(req.url, 'http://x');
+        if (u.pathname.endsWith('/lookup')) { // Nominatim: квадраты по сетке над Москвой
+          const ids = u.searchParams.get('osm_ids').split(',').map((x) => Number(x.slice(1)));
+          resp.end(JSON.stringify({ type: 'FeatureCollection', features: ids.map((id) => {
+            const x = 37.3 + (id % 10) * 0.07; const y = 55.55 + (Math.floor(id / 10) % 6) * 0.07;
+            return { type: 'Feature', properties: { osm_type: 'relation', osm_id: id }, geometry: { type: 'Polygon', coordinates: [[[x, y], [x + 0.06, y], [x + 0.06, y + 0.06], [x, y + 0.06], [x, y]]] } };
+          }) }));
+          return;
+        }
+        const q = new URLSearchParams(data).get('data') || '';
+        if (q.includes('boundary')) resp.end(JSON.stringify({ elements: relations[q.includes('"admin_level"="5"') ? 5 : 8] }));
+        else resp.end(body);
+      });
     });
     srv.listen(0, '127.0.0.1', () => res(srv));
   });
@@ -188,7 +212,8 @@ function prepareSourceFolder() {
   basemapSamples = JSON.parse(execFileSync(PY, [...PY_ARGS, '-c', 'import sys, test_tools as t; t.write_e2e_source(sys.argv[1])', planet], { cwd: join(ROOT, 'tests') }).toString());
   const tileServer = await rangeServer(planet);
   const osm = overpassElements();
-  const overpass = await overpassServer(osm.els);
+  const synthAreas = [...new Set(expectedKpi().rows.map((r) => r.area).filter(Boolean))];
+  const overpass = await osmServer(osm.els, boundaryRelations(synthAreas));
   const m0 = readCsv(join(FIX, 'mji_synthetic.csv'));
   const ambAddr = m0.rows.filter((r) => osm.plan.get(r[m0.header.indexOf('UNOM')]) === 'ambiguous').map((r) => r[m0.header.indexOf('Наименование/адрес')]);
   const yandex = await yandexServer(ambAddr);
@@ -196,6 +221,7 @@ function prepareSourceFolder() {
   const server = await startServer(port, {
     MCA_BASEMAP_SOURCE: `http://127.0.0.1:${tileServer.address().port}/planet.pmtiles`,
     MCA_OVERPASS_URL: `http://127.0.0.1:${overpass.address().port}/api/interpreter`,
+    MCA_NOMINATIM_URL: `http://127.0.0.1:${overpass.address().port}/nominatim`,
     MCA_YANDEX_URL: `http://127.0.0.1:${yandex.address().port}/1.x/`,
     MCA_GEOCODER_CONFIG: GEOCODER_CONFIG,
   });
@@ -399,6 +425,26 @@ function prepareSourceFolder() {
       log('координаты по адресам: справочник или geocoded_houses.csv уже есть, проверка пропущена');
     }
 
+    // 8) Границы округов и районов одной кнопкой (список из Overpass, полигоны из Nominatim), сохраняются на диск
+    if (BOUNDS_TEST) {
+      await page.click('.nav-item[data-view="import"]');
+      await page.click('#view-import button:has-text("Загрузить границы округов и районов")');
+      await page.waitForSelector('.toast:has-text("Границы загружены")', { timeout: 60000 });
+      const b = await page.evaluate(() => {
+        const s = window.__app.state.boundaries;
+        return { okrug: s.okrug.geojson.features.length, area: s.area.geojson.features.length, um: s.okrug.unmatched.length + s.area.unmatched.length };
+      });
+      assert.deepEqual(b, { okrug: 12, area: synthAreas.length, um: 0 }, 'все полигоны сопоставлены с округами и районами МЖИ');
+      assert.ok(BOUNDS.every((f) => existsSync(f)), 'границы сохранены в data/local/osm');
+      await page.click('.nav-item[data-view="map"]');
+      await page.evaluate(() => { window.__app.map.map.setView([55.75, 37.6], 9); });
+      await page.waitForTimeout(800);
+      await page.screenshot({ path: join(OUT, '12_map_boundaries.png') });
+      log(`границы: округов ${b.okrug}, районов ${b.area}, все сопоставлены с МЖИ`);
+    } else {
+      log('границы: файлы в data/local/osm уже есть, проверка пропущена');
+    }
+
     assert.deepEqual(errors, [], `ошибки в консоли: ${errors.join(' | ')}`);
     log('E2E: все проверки пройдены. Скриншоты:', OUT);
   } catch (e) {
@@ -417,6 +463,8 @@ function prepareSourceFolder() {
     yandex.close();
     if (BASEMAP_TEST) for (const f of [BASEMAP, `${BASEMAP}.json`]) rmSync(f, { force: true });
     if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED, YANDEX_CACHE]) rmSync(f, { force: true });
+    if (BOUNDS_TEST) for (const f of BOUNDS) rmSync(f, { force: true });
+    try { rmdirSync(join(ROOT, 'data', 'local', 'osm')); } catch (_) { /* папка не пуста или её нет */ }
     rmSync(SRC_DIR, { recursive: true, force: true });
   }
 })().catch((e) => { console.error('E2E ОШИБКА:', e); process.exit(1); });
