@@ -1,0 +1,49 @@
+КОНТРОЛЬ ОБЪЕДИНЕНИЯ ДАННЫХ ЕДЦ — Подъезд
+====================================================================
+Строк исходного реестра: 1025
+Строк выходного CSV: 1025
+Строк с найденными агрегатами заявок: 202
+Строк без подходящего агрегата: 823
+Строк с расхождением УНОМ (сопоставление по UUID): 0
+Агрегатов уровня Подъезд в CSV заявок: 335
+Агрегатов, сопоставленных хотя бы один раз: 212
+Агрегатов, оставшихся без привязки: 123
+
+Несопоставленные агрегаты по типу ключей:
+  address.root_id / UNKNOWN: 113
+  address.root_id / entrances.id: 5
+  address.id / UNKNOWN: 4
+  address.root_id / NUMBER: 1
+
+Примеры несопоставленных агрегатов (первые 20):
+  address.root_id | 013c5f09-3c60-4b29-ac41-d31ed7d3bc32 | UNKNOWN | UNKNOWN | заявок: 10
+  address.root_id | 02aea95e-ae68-4fe2-a66b-8df884bc2b4e | UNKNOWN | UNKNOWN | заявок: 5
+  address.root_id | 0332a06a-a66c-488b-8fe6-c899cce053f6 | UNKNOWN | UNKNOWN | заявок: 20
+  address.root_id | 038bb6cd-1a4e-4ed2-985e-beeb5476947d | entrances.id | 657979e2-07f9-41f6-8dbb-fb397719e40d | заявок: 14
+  address.root_id | 044a398c-42b6-419a-9b6a-d12fc934db68 | UNKNOWN | UNKNOWN | заявок: 20
+  address.root_id | 046d6eed-5dcf-4872-bddd-d2c54ab7bd5e | UNKNOWN | UNKNOWN | заявок: 25
+  address.root_id | 04fe6865-ac9c-4e9d-a681-da2f2df0355e | UNKNOWN | UNKNOWN | заявок: 2
+  address.root_id | 058cae79-5e41-4f42-97d6-298d5fa1f4ea | UNKNOWN | UNKNOWN | заявок: 23
+  address.root_id | 074f1b57-df13-4e97-bf5b-ae1d65704253 | entrances.id | 42acad5d-d1e4-422f-bca6-0f9c146bdb7f | заявок: 1
+  address.root_id | 074f1b57-df13-4e97-bf5b-ae1d65704253 | UNKNOWN | UNKNOWN | заявок: 10
+  address.root_id | 08f03e7b-6f81-400a-bcb7-7b2e582fc771 | UNKNOWN | UNKNOWN | заявок: 21
+  address.root_id | 0ac895ae-bfb2-4c19-9626-a0a6e38079b0 | UNKNOWN | UNKNOWN | заявок: 2
+  address.root_id | 0aeade9b-a245-4658-a4bf-58e7b14fe2d6 | UNKNOWN | UNKNOWN | заявок: 25
+  address.root_id | 10032bdd-2693-4928-8f73-c4b2be5f09e3 | UNKNOWN | UNKNOWN | заявок: 10
+  address.root_id | 142e58ee-2ad0-4b16-9111-82c44b62f666 | entrances.id | 75ac80ef-6f82-4731-9086-8a8b6660a278 | заявок: 4
+  address.root_id | 142e58ee-2ad0-4b16-9111-82c44b62f666 | UNKNOWN | UNKNOWN | заявок: 18
+  address.root_id | 15eedc07-2b62-4461-8e00-900148fcd483 | UNKNOWN | UNKNOWN | заявок: 17
+  address.root_id | 183c06dd-46fa-4233-84c4-399fe5f5f09e | UNKNOWN | UNKNOWN | заявок: 21
+  address.root_id | 191b2a00-592f-4e2a-8138-c444b25029ae | UNKNOWN | UNKNOWN | заявок: 14
+  address.root_id | 19cc6802-b590-4ff4-8c0d-66168d92fab1 | UNKNOWN | UNKNOWN | заявок: 17
+
+Строк с пустым ID подъезда (заглушки домов): 191
+Строк с совпадением по UUID подъезда: 197
+Строк с дополнительным совпадением по номеру: 15
+Неоднозначные номера (если включена опция): 0
+Сопоставление только по номеру: ВКЛЮЧЕНО
+
+ВАЖНО: заявки с ключом подъезда UNKNOWN и резервным entrances.id не могут
+автоматически распределяться между подъездами без данных для сопоставления.
+Пустой результат поиска по UUID подъезда не доказывает отсутствие заявок вообще.
+Период статистики: созданные в 2026 году, фактически по момент выгрузки.

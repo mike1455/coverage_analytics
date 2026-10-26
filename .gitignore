@@ -1,0 +1,12 @@
+# Локальные данные пользователя (реестры, выгрузки, подложка) — никогда не коммитятся
+data/local/*
+!data/local/README.md
+*.pmtiles
+
+# Служебное
+node_modules/
+__pycache__/
+*.pyc
+tests/e2e/output/
+.DS_Store
+Thumbs.db
