@@ -205,12 +205,46 @@ class SourcesApi(unittest.TestCase):
         self.assertEqual(self.req("/api/source/geo")[0], 404)
         self.req("/api/sources", {"folder": "%MCA_TEST_DIR%", "files": {"houses": self.NAMES["houses"], "requests": self.NAMES["requests"]}})
 
+    def test_open_folder_guarded(self):
+        self.assertEqual(self.req("/api/open-folder", data={}, headers={"Host": "evil.example"})[0], 403)
+        self.assertEqual(self.req("/api/open-folder", data={}, headers={"Content-Type": "text/plain"})[0], 415)
+
     def test_foreign_host_and_bad_requests(self):
         self.assertEqual(self.req("/api/sources", headers={"Host": "evil.example:80"})[0], 403)
         self.assertEqual(self.req("/api/source/houses", headers={"Host": "evil.example"})[0], 403)
         self.assertEqual(self.req("/api/source/unknown")[0], 404)
         st = self.req("/api/sources", data={"folder": "x"}, headers={"Content-Type": "text/plain"})[0]
         self.assertEqual(st, 415, "простые запросы с других сайтов не могут менять настройки")
+
+
+class FolderResolution(unittest.TestCase):
+    """Папка по умолчанию data/input внутри приложения, запасная — на рабочем столе."""
+
+    def test_defaults_point_to_data_input_with_user_names(self):
+        cfg = json.loads((ROOT / "config" / "sources.default.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["folder"], "data/input")
+        self.assertIn("ФАЙЛЫ ИТОГ", cfg["fallbackFolders"][0])
+        self.assertEqual(cfg["files"]["houses"], "Запрос № 2. Выгрузка № 1 — ВСЕ адреса, одна строка на дом.csv")
+        self.assertTrue(cfg["files"]["mji"].endswith("202610191348.xlsx"))
+        self.assertTrue((ROOT / "data" / "input" / "README.md").is_file())
+
+    def test_relative_primary_and_fallback(self):
+        serve = load("serve_folders", ROOT / "serve.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "app"
+            (app / "data" / "input").mkdir(parents=True)
+            desk = Path(tmp) / "Рабочий стол" / "ФАЙЛЫ ИТОГ"
+            desk.mkdir(parents=True)
+            (desk / "дома.csv").write_text("x", encoding="utf-8")
+            serve.ROOT = app
+            folder, ok = serve.resolve_folder("data/input", [str(desk)], ["дома.csv"])
+            self.assertTrue(ok)
+            self.assertEqual(Path(folder), desk, "в data/input пусто — берётся запасная папка с файлами")
+            (app / "data" / "input" / "дома.csv").write_text("x", encoding="utf-8")
+            folder, _ = serve.resolve_folder("data/input", [str(desk)], ["дома.csv"])
+            self.assertEqual(Path(folder), app / "data" / "input", "файлы есть в data/input — она главнее")
+            folder, _ = serve.resolve_folder("data/input", [str(desk)], ["нет-такого.csv"])
+            self.assertEqual(Path(folder), app / "data" / "input")
 
 
 class Basemap(unittest.TestCase):

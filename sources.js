@@ -27,6 +27,14 @@ export async function saveSources(cfg) {
   return st;
 }
 
+/** Открыть текущую папку с выгрузками в проводнике (Windows) — делает serve.py. */
+export async function openFolder() {
+  const r = await fetch('api/open-folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `Не удалось открыть папку (${r.status})`);
+  return d.opened;
+}
+
 /** Прочитать файлы выбранных ролей с диска → File[] (имя и дата изменения — как у исходных файлов). */
 export async function fetchSourceFiles(state, roles, onProgress = () => {}) {
   const out = [];
@@ -90,9 +98,16 @@ export async function openSourcesDialog(app, { onLoad } = {}) {
 
   const render = () => {
     const box = h('div', { class: 'stack' });
-    box.append(h('p', { class: 'ink2' }, 'Укажите папку и имена файлов — их можно вписать вручную или выбрать из подсказки. Имя может быть и полным путём. ',
+    box.append(h('p', { class: 'ink2' }, 'Проще всего положить выгрузки в папку ', h('b', { class: 'mono' }, 'data/input'),
+      ' внутри приложения под именами из таблицы ниже. Имена и папку можно поменять: впишите свои или выберите из подсказки (имя может быть и полным путём). ',
       'Настройки сохраняются на этом компьютере (', h('span', { class: 'mono small' }, 'config/sources.local.json'), ') и при следующем запуске подставятся сами.'));
-    box.append(h('div', { class: 'field-inline' }, h('label', null, 'Папка'), folderIn));
+    box.append(h('div', { class: 'field-inline' }, h('label', null, 'Папка'),
+      h('div', { style: { display: 'flex', gap: '8px' } }, folderIn,
+        h('button', {
+          class: 'btn', title: 'Открыть папку в проводнике', onclick: async () => {
+            try { await openFolder(); } catch (e) { toast(e.message, 'error'); }
+          },
+        }, icon('database', 15), 'Открыть папку'))));
     box.append(h('div', { class: 'small' }, st.folderExists
       ? h('span', null, h('span', { class: 'badge st-full' }, icon('check', 13), 'папка найдена'), ' ', h('span', { class: 'mono' }, st.folderResolved), ` · файлов: ${st.folderFiles.length}`)
       : h('span', null, h('span', { class: 'badge st-none' }, icon('xCircle', 13), 'папка не найдена'), ' ', h('span', { class: 'mono' }, st.folderResolved || '—'))));
@@ -179,9 +194,11 @@ export function sourcesSummary(app, st, { onOpen } = {}) {
     const mark = f.exists ? (alreadyLoaded(app, r, f) ? '✓ загружен' : '● новый') : '✗ нет';
     return `${ROLE_SHORT[r]}: ${mark}`;
   }).join(' · ')),
+  !found.length ? h('div', { class: 'small ink2' }, 'Положите выгрузки в папку ', h('b', { class: 'mono' }, 'data/input'), ' приложения (имена — в окне «Папка и имена файлов» и в data/input/README.md).') : null,
   h('div', { class: 'actions-row' },
     h('button', { class: `btn ${fresh.length ? 'btn-primary' : ''}`, onclick: () => (onOpen ? onOpen() : openSourcesDialog(app)) }, icon('database', 16),
-      fresh.length ? `Загрузить из папки (${fresh.length})` : 'Папка и имена файлов…')));
+      fresh.length ? `Загрузить из папки (${fresh.length})` : 'Папка и имена файлов…'),
+    h('button', { class: 'btn btn-ghost', onclick: async () => { try { await openFolder(); } catch (e) { toast(e.message, 'error'); } } }, 'Открыть папку')));
   return card;
 }
 

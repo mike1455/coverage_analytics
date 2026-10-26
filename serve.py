@@ -43,11 +43,14 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 
 # ---------------------------------------------------------------- настройки источников
 
-def expand_path(p):
-    """%USERPROFILE%, %ONEDRIVE%, ~ и $HOME раскрываются на любой ОС; кавычки по краям убираются."""
+def expand_path(p, base=None):
+    """%USERPROFILE%, %ONEDRIVE%, ~ и $HOME раскрываются на любой ОС; кавычки по краям убираются.
+    Относительный путь (например, data/input) считается от папки приложения."""
     s = str(p or "").strip().strip('"').strip("'").strip()
     s = re.sub(r"%([^%]+)%", lambda m: os.environ.get(m.group(1), os.environ.get(m.group(1).upper(), m.group(0))), s)
     s = os.path.expandvars(os.path.expanduser(s))
+    if s and not os.path.isabs(s) and "%" not in s:
+        s = os.path.normpath(os.path.join(str(base or ROOT), s))
     return s
 
 
@@ -80,20 +83,31 @@ def read_json(path):
 def load_config():
     base = read_json(DEFAULT_CONFIG) or {"folder": "", "files": {}}
     local = read_json(LOCAL_CONFIG)
-    cfg = {"folder": base.get("folder", ""), "files": dict(base.get("files", {}))}
+    cfg = {"folder": base.get("folder", ""), "files": dict(base.get("files", {})),
+           "fallbackFolders": list(base.get("fallbackFolders", []))}
     if local:
         if "folder" in local:
             cfg["folder"] = local["folder"]
+            cfg["fallbackFolders"] = []  # папку задал пользователь — запасные варианты не нужны
         cfg["files"].update(local.get("files", {}))
     cfg["files"] = {r: str(cfg["files"].get(r, "") or "") for r in ROLES}
     return cfg, bool(local)
 
 
-def resolve_folder(raw):
-    for c in folder_candidates(raw):
-        if c and os.path.isdir(c):
+def resolve_folder(raw, fallbacks=(), names=()):
+    """Основная папка, затем запасные. Берётся первая, где лежит хотя бы один из нужных файлов;
+    если файлов нет нигде — первая существующая папка."""
+    cands = []
+    for r in [raw, *fallbacks]:
+        for c in folder_candidates(r):
+            if c and c not in cands:
+                cands.append(c)
+    existing = [c for c in cands if os.path.isdir(c)]
+    for c in existing:
+        if any(n and os.path.isfile(resolve_file(c, n) or "") for n in names):
             return c, True
-    cands = folder_candidates(raw)
+    if existing:
+        return existing[0], True
     return (cands[0] if cands else ""), False
 
 
@@ -101,10 +115,8 @@ def resolve_file(folder, name):
     name = str(name or "").strip().strip('"').strip()
     if not name:
         return None
-    p = expand_path(name)
-    if not os.path.isabs(p):
-        p = os.path.join(folder, p)
-    return os.path.normpath(p)
+    # Относительное имя — внутри папки с выгрузками (а не папки приложения)
+    return os.path.normpath(expand_path(name, base=folder))
 
 
 def file_info(path):
@@ -125,7 +137,7 @@ def file_info(path):
 
 def sources_state():
     cfg, has_local = load_config()
-    folder, folder_ok = resolve_folder(cfg["folder"])
+    folder, folder_ok = resolve_folder(cfg["folder"], cfg["fallbackFolders"], [cfg["files"][r] for r in ROLES])
     listing = []
     if folder_ok:
         try:
@@ -142,7 +154,7 @@ def sources_state():
     return {
         "folder": cfg["folder"], "folderResolved": folder, "folderExists": folder_ok,
         "folderFiles": listing[:500], "files": files, "roles": ROLES, "customized": has_local,
-        "configFile": str(LOCAL_CONFIG),
+        "configFile": str(LOCAL_CONFIG), "inputFolder": str(ROOT / "data" / "input"),
     }
 
 
@@ -223,10 +235,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(405, {"error": "Метод не поддерживается"})
         if not self._local_request():
             return self._json(403, {"error": "Доступ только с localhost"})
-        if urllib.parse.urlsplit(self.path).path != "/api/sources":
+        route = urllib.parse.urlsplit(self.path).path
+        if route not in ("/api/sources", "/api/open-folder"):
             return self._json(404, {"error": "Нет такого метода"})
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json(415, {"error": "Нужен Content-Type: application/json"})
+        if route == "/api/open-folder":
+            return self._open_folder()
         try:
             length = int(self.headers.get("Content-Length") or 0)
             if length > 65536:
@@ -236,6 +251,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (ValueError, OSError) as e:
             return self._json(400, {"error": str(e)})
         return self._json(200, sources_state())
+
+    def _open_folder(self):
+        """Открыть текущую папку с выгрузками в проводнике (только её, путь берётся из настроек)."""
+        st = sources_state()
+        folder = st["folderResolved"]
+        if not os.path.isdir(folder):
+            if os.path.normcase(os.path.normpath(folder)) != os.path.normcase(st["inputFolder"]):
+                return self._json(404, {"error": "Папка не найдена: %s" % folder})
+            os.makedirs(folder, exist_ok=True)  # data/input создаём по требованию
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # проводник Windows
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", folder])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", folder], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            return self._json(500, {"error": "Не удалось открыть папку: %s" % e, "folder": folder})
+        return self._json(200, {"opened": folder})
 
     def _api_get(self):
         if not self._local_request():

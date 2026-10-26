@@ -1,6 +1,8 @@
 # Локальные данные пользователя (реестры, выгрузки, подложка) — никогда не коммитятся
 data/local/*
 !data/local/README.md
+data/input/*
+!data/input/README.md
 *.pmtiles
 config/sources.local.json
 config/*.tmp
