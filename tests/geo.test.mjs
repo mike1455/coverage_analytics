@@ -80,3 +80,19 @@ test('экспорт GeoJSON: точки, контуры и зоны подъе�
   assert.deepEqual(fc.features.map((f) => f.properties.kind), ['point', 'building', 'entrance_zone']);
   assert.equal(fc.features[0].properties.unom, '001');
 });
+
+test('JSON адресного реестра с data.mos.ru: UNOM, контур и центр', () => {
+  const poly = { type: 'Polygon', coordinates: [[[37.60, 55.75], [37.61, 55.75], [37.61, 55.76], [37.60, 55.76], [37.60, 55.75]]] };
+  const text = JSON.stringify([
+    { global_id: 1, UNOM: 5000002, ADDRESS: 'улица Лескова, дом 5', geoData: poly, geodata_center: { type: 'Point', coordinates: [37.605, 55.755] } },
+    { global_id: 2, UNOM: '5000003', geoData: JSON.stringify(poly) }, // геометрия строкой, центра нет
+    { global_id: 3, UNOM: 7, geodata_center: { type: 'Point', coordinates: [30.3, 59.9] } }, // вне Москвы
+  ]);
+  const { records, warnings } = parseGeoFile('data-60562.json', text);
+  assert.equal(records.length, 2);
+  assert.deepEqual([records[0].u, records[0].lat, records[0].lon], ['5000002', 55.755, 37.605]);
+  assert.equal(records[0].building.type, 'Polygon');
+  assert.ok(Math.abs(records[1].lat - 55.755) < 1e-6 && Math.abs(records[1].lon - 37.605) < 1e-6, 'центр по контуру');
+  assert.equal(records[0].source, 'Адресный реестр Москвы, data.mos.ru');
+  assert.equal(warnings.length, 1);
+});

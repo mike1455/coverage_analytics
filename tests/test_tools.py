@@ -962,6 +962,8 @@ class OsmBoundaries(unittest.TestCase):
             self.assertEqual(area["features"][1]["properties"]["name"], "поселение Филимонковское")
             self.assertEqual(area["features"][0]["geometry"]["type"], "Polygon")
             self.assertNotIn(("overpass", "geom", "5"), fake.log, "тяжёлый запрос геометрии не нужен, если ответил Nominatim")
+            self.assertEqual({k: st["area"][k] for k in ("listed", "got", "state")}, {"listed": 2, "got": 2, "state": "ok"}, "счётчики хода загрузки")
+            self.assertIn("Nominatim", st["okrug"]["via"])
             self.assertEqual(sum(1 for x in fake.log if x[:2] == ("nominatim", "lookup")), 2)
             self.assertEqual(OB.status(self.dir)["area"]["exists"], True)
         finally:
@@ -987,6 +989,7 @@ class OsmBoundaries(unittest.TestCase):
             st = self.run_download(fake, areas=["Арбат", "Сосенское", "Неизвестный"])
             self.assertEqual(st["state"], "done", st)
             self.assertEqual(len(self.read("okrug")["features"]), 12)
+            self.assertEqual((st["area"]["listed"], st["area"]["got"], st["area"]["checked"]), (3, 2, 3))
             self.assertEqual([f["properties"]["name"] for f in self.read("area")["features"]], ["Арбат", "Сосенское"])
             self.assertIn(("nominatim", "search", "поселение Сосенское, Москва"), fake.log)
         finally:
@@ -1006,6 +1009,116 @@ class OsmBoundaries(unittest.TestCase):
         finally:
             OB.time.sleep = orig
             fake.close()
+
+
+MR = load("mos_registry_mod", ROOT / "tools" / "mos_registry.py")
+
+REG_POLY = {"type": "Polygon", "coordinates": [[[37.60, 55.75], [37.61, 55.75], [37.61, 55.76], [37.60, 55.76], [37.60, 55.75]]]}
+
+
+def registry_items(n):
+    """Записи в формате apidata.mos.ru /features: properties.Attributes с UNOM, geoData и geodata_center."""
+    out = []
+    for i in range(n):
+        attrs = {"global_id": i, "UNOM": 5000000 + i, "geodata_center": {"type": "Point", "coordinates": [37.5 + i * 1e-4, 55.7]}}
+        if i % 2 == 0:
+            attrs["geoData"] = REG_POLY
+        geometry = REG_POLY if i % 2 == 0 else attrs["geodata_center"]  # у части зданий в реестре нет контура
+        out.append({"type": "Feature", "geometry": geometry, "properties": {"DatasetId": 60562, "Attributes": attrs}})
+    out.append({"type": "Feature", "geometry": None, "properties": {"Attributes": {"global_id": -1}}})  # без UNOM
+    return out
+
+
+class FakeMosData:
+    def __init__(self, n=2500, key="good-key-1234"):
+        self.items, self.key, self.calls = registry_items(n), key, []
+        fake = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                u = urllib.parse.urlsplit(self.path)
+                q = urllib.parse.parse_qs(u.query)
+                fake.calls.append((u.path, q.get("$skip", [""])[0]))
+                if q.get("api_key", [""])[0] != fake.key:
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                if u.path.endswith("/count"):
+                    body = json.dumps(len(fake.items))
+                else:
+                    skip, top = int(q["$skip"][0]), int(q["$top"][0])
+                    body = json.dumps({"type": "FeatureCollection", "features": fake.items[skip:skip + top]})
+                data = body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+        self.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = "http://127.0.0.1:%d/v1" % self.srv.server_address[1]
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class MosRegistry(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.settings, self.out = d / "geocoder.local.json", d / "mos_registry.json"
+        self.fake = FakeMosData()
+
+    def tearDown(self):
+        self.fake.close()
+        self.tmp.cleanup()
+
+    def test_parse_item_formats(self):
+        r = MR.parse_item({"properties": {"Attributes": {"UNOM": "00123", "geodata_center": {"type": "Point", "coordinates": [37.6, 55.75]}}}})
+        self.assertEqual(r[:3], ("123", 55.75, 37.6))
+        r = MR.parse_item({"Cells": {"UNOM": 7, "geoData": json.dumps(REG_POLY)}})  # формат /rows, геометрия строкой
+        self.assertAlmostEqual(r[1], 55.755)
+        self.assertAlmostEqual(r[2], 37.605)
+        self.assertEqual(r[3]["type"], "Polygon")
+        self.assertIsNone(MR.parse_item({"Cells": {"UNOM": 8, "geodata_center": {"type": "Point", "coordinates": [30.3, 59.9]}}}))
+
+    def test_settings_keep_yandex_key(self):
+        YG.save_settings({"apiKey": "yandex-key-1234"}, self.settings)
+        MR.save_settings({"mosKey": "good-key-1234"}, self.settings)
+        YG.save_settings({"dailyLimit": 5}, self.settings)
+        self.assertEqual(YG.load_settings(self.settings)["apiKey"], "yandex-key-1234")
+        self.assertEqual(MR.load_settings(self.settings)["mosKey"], "good-key-1234")
+        st = MR.public_state(self.settings, self.out)
+        self.assertEqual((st["hasKey"], st["keyTail"], st["dataset"]), (True, "1234", 60562))
+        with self.assertRaises(ValueError):
+            MR.save_settings({"mosKey": "плохой ключ"}, self.settings)
+
+    def test_download_pages_and_matches_unoms(self):
+        MR.save_settings({"mosKey": "good-key-1234"}, self.settings)
+        prog = BM.Progress()
+        MR.download(prog, unoms=["5000002", "5000003", "9999999"], settings_path=self.settings, out=self.out, base=self.fake.url, pause=0)
+        st = prog.snapshot()
+        self.assertEqual(st["state"], "done", st)
+        self.assertEqual((st["records"], st["total"], st["found"], st["wanted"]), (2501, 2501, 2, 3))
+        self.assertEqual([c[1] for c in self.fake.calls if c[0].endswith("/features")], ["0", "1000", "2000"])
+        doc = json.loads(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(doc["count"], 2500)
+        self.assertEqual(doc["points"]["5000003"], [55.7, 37.5003])
+        self.assertEqual(sorted(doc["shapes"]), ["5000002"], "контуры только для домов реестра МЖИ")
+        self.assertEqual(MR.public_state(self.settings, self.out)["count"], 2500)
+
+    def test_bad_key_keeps_old_file(self):
+        self.out.write_text('{"old":1}', encoding="utf-8")
+        MR.save_settings({"mosKey": "wrong-key-0000"}, self.settings)
+        prog = BM.Progress()
+        MR.download(prog, settings_path=self.settings, out=self.out, base=self.fake.url, pause=0)
+        self.assertEqual(prog.snapshot()["state"], "error")
+        self.assertIn("ключ", prog.snapshot()["message"])
+        self.assertEqual(json.loads(self.out.read_text(encoding="utf-8")), {"old": 1})
 
 
 if __name__ == "__main__":

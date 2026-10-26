@@ -312,6 +312,7 @@ class Progress:
         self.message = ""
         self.started = None
         self.finished = None
+        self.extra = {}  # счётчики для показа: адреса, найденные дома и т. п.
 
     def set(self, **kw):
         with self.lock:
@@ -329,7 +330,7 @@ class Progress:
     def snapshot(self):
         with self.lock:
             return {"state": self.state, "stage": self.stage, "done": self.done, "total": self.total,
-                    "message": self.message, "started": self.started, "finished": self.finished}
+                    "message": self.message, "started": self.started, "finished": self.finished, **self.extra}
 
 
 def _collect(src, hd, wanted, progress):

@@ -51,7 +51,8 @@ def load_settings(path=SETTINGS):
 
 
 def save_settings(data, path=SETTINGS):
-    cur = load_settings(path)
+    cur = read_json(path, {})  # в файле есть и другие настройки (ключ data.mos.ru), их не трогаем
+    cur.update(load_settings(path))
     if "apiKey" in data:
         key = str(data.get("apiKey") or "").strip()
         if key and not re.fullmatch(r"[A-Za-z0-9-]{8,64}", key):
@@ -153,6 +154,8 @@ def run(progress, items, settings_path=SETTINGS, cache_path=CACHE, rate=RATE):
                 if rate:
                     time.sleep(rate)
             progress.results[str(it.get("id"))] = hit
+            if hit and hit.get("kind") == "house" and hit.get("precision") in ("exact", "number", "near"):
+                progress.extra["found"] = progress.extra.get("found", 0) + 1
             progress.set(done=i + 1, stage="Яндекс Геокодер: %d из %d" % (i + 1, len(items)))
         write_json(cache_path, cache)
         progress.set(state="done", finished=now())

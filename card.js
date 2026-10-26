@@ -215,7 +215,7 @@ function requestsSection(e, app) {
 }
 
 // ---------- геопривязка ----------
-const GEO_STATUS = { manual: 'указано вручную', verified: 'проверено', auto: 'геокодер, требует проверки', imported: 'импорт из файла', osm: 'OpenStreetMap, адрес совпал', yandex: 'Яндекс Геокодер' };
+const GEO_STATUS = { manual: 'указано вручную', verified: 'проверено', auto: 'геокодер, требует проверки', imported: 'импорт из файла', osm: 'OpenStreetMap, адрес совпал', yandex: 'Яндекс Геокодер', mosreg: 'Адресный реестр Москвы, по UNOM' };
 
 function geoSection(app, row) {
   const g = app.state.geo.get(row.u);

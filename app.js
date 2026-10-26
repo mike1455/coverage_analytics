@@ -666,7 +666,7 @@ function areaTable() {
 
 // ---------------------------------------------------------------- вид «Дома и подъезды»
 
-const GEO_LABEL = { '': 'Любая', none: 'Нет координат', any: 'Есть координаты', osm: 'OSM по адресу', yandex: 'Яндекс Геокодер', auto: 'Геокодер (не проверено)', verified: 'Проверено', manual: 'Вручную', imported: 'Из файла', review: 'Требует проверки' };
+const GEO_LABEL = { '': 'Любая', none: 'Нет координат', any: 'Есть координаты', mosreg: 'Реестр Москвы (UNOM)', osm: 'OSM по адресу', yandex: 'Яндекс Геокодер', auto: 'Геокодер (не проверено)', verified: 'Проверено', manual: 'Вручную', imported: 'Из файла', review: 'Требует проверки' };
 
 function filteredHouses() {
   const t = app.ui.table;
@@ -762,7 +762,7 @@ function renderHouses() {
         h('td', null, statusBadge(r.cov), r.na ? h('div', { class: 'sub' }, NA_REASON[r.na]) : null),
         h('td', { class: 'r' }, r.e ? `${fmt.int(Math.min(r.e.el, r.e.et))} / ${fmt.int(r.e.et)}` : na()),
         h('td', { class: 'r' }, r.q ? fmt.int(reqValue(r, 'total', q)) : na()),
-        h('td', null, g ? h('span', { class: `chip ${g.status === 'auto' || g.review ? 'warn' : ''}` }, { manual: 'вручную', verified: 'проверено', auto: 'проверить', imported: 'файл', osm: 'OSM', yandex: 'Яндекс' }[g.status] || g.status) : na()));
+        h('td', null, g ? h('span', { class: `chip ${g.status === 'auto' || g.review ? 'warn' : ''}` }, { manual: 'вручную', verified: 'проверено', auto: 'проверить', imported: 'файл', osm: 'OSM', yandex: 'Яндекс', mosreg: 'реестр' }[g.status] || g.status) : na()));
     })));
   v.append(h('div', { class: 'table-wrap' }, tbl));
   v.append(h('div', { class: 'pager' },
@@ -848,7 +848,7 @@ function sourceCardGeo() {
   const buildings = [...st.geo.values()].filter((g) => g.building).length;
   return srcCard('Геоданные (ручная работа)', st.geo.size > 0, [
     `${fmt.int(st.geo.size)} домов с координатами, ${fmt.int(buildings)} контуров, ${fmt.int(st.zones.length)} зон подъездов`,
-    Object.entries(by).map(([k, n]) => `${{ manual: 'вручную', verified: 'проверено', auto: 'требует проверки', imported: 'из файла', osm: 'OSM по адресу', yandex: 'Яндекс Геокодер' }[k] || k}: ${fmt.int(n)}`).join(', ') || 'Хранятся отдельно от ежемесячных выгрузок.',
+    Object.entries(by).map(([k, n]) => `${{ manual: 'вручную', verified: 'проверено', auto: 'требует проверки', imported: 'из файла', osm: 'OSM по адресу', yandex: 'Яндекс Геокодер', mosreg: 'реестр Москвы' }[k] || k}: ${fmt.int(n)}`).join(', ') || 'Хранятся отдельно от ежемесячных выгрузок.',
     `Ручных соответствий МЖИ и ЕДЦ: ${fmt.int(st.overrides.size)}`]);
 }
 
@@ -928,14 +928,14 @@ function historyCard() {
 function geoToolsCard() {
   const fileIn = h('input', { type: 'file', accept: '.csv,.geojson,.json', class: 'hidden', onchange: (e) => app.importGeoFiles([...e.target.files]) });
   return h('div', { class: 'card stack' }, h('div', { class: 'card-head' }, h('h3', null, 'Геопривязка'), h('span', { class: 'sub' }, 'отдельно от ежемесячных выгрузок')),
-    h('div', { class: 'small ink2' }, 'Одна кнопка находит координаты всех домов реестра: по адресам OpenStreetMap, а оставшиеся через Яндекс Геокодер, если указан ключ.'),
+    h('div', { class: 'small ink2' }, 'Координаты всех домов реестра из выбранных источников: адресный реестр Москвы по UNOM, OpenStreetMap и Яндекс Геокодер по адресу.'),
     h('div', { class: 'actions-row' },
       h('button', { class: 'btn btn-primary', onclick: () => openGeocodeDialog(app) }, icon('pin', 16), 'Найти координаты всех домов'),
       h('button', { class: 'btn', onclick: () => batchGeocodeDialog() }, icon('search', 16), 'Район через Nominatim'),
       h('button', { class: 'btn', onclick: () => fileIn.click() }, icon('upload', 16), 'Импорт CSV/GeoJSON'),
       h('button', { class: 'btn', onclick: exportGeo, disabled: !app.state.geo.size && !app.state.zones.length }, icon('download', 16), 'Экспорт GeoJSON')),
     fileIn,
-    h('div', { class: 'small muted' }, 'CSV: колонки unom, lat, lon (или УНОМ, широта, долгота), опционально source, accuracy. GeoJSON: Point или Polygon с properties.UNOM. Точки вне Москвы отбрасываются.'));
+    h('div', { class: 'small muted' }, 'CSV: колонки unom, lat, lon (или УНОМ, широта, долгота), опционально source, accuracy. GeoJSON: Point или Polygon с properties.UNOM. JSON адресного реестра с data.mos.ru (поля UNOM и geoData). Точки вне Москвы отбрасываются.'));
 }
 
 function boundariesCard() {
@@ -1191,15 +1191,38 @@ async function batchGeocodeDialog() {
 
 /** Границы округов и районов одной кнопкой: serve.py скачивает их в data/local/osm, приложение сохраняет у себя. */
 async function loadBoundaries() {
-  const stage = h('div', { class: 'small ink2' }, 'Подготовка');
+  const rowsEl = h('div', { class: 'run-steps' });
+  const bar = h('i', { style: { width: '3%' } });
+  const stage = h('div', { class: 'small muted' }, 'Подготовка');
   const m = modal({
-    title: 'Границы округов и районов', dismissable: false, actions: [],
-    body: h('div', { class: 'stack', style: { gap: '10px' } }, h('div', { class: 'ink2' }, 'Загрузка из OpenStreetMap, обычно меньше минуты.'), stage, h('div', { class: 'progress indeterminate' }, h('i', { style: { width: '30%' } }))),
+    title: 'Границы округов и районов', dismissable: false,
+    actions: [{ label: 'Отменить', close: false, onClick: () => postJson('api/boundaries/cancel').catch(() => null) }],
+    body: h('div', { class: 'stack', style: { gap: '12px' } },
+      h('div', { class: 'ink2' }, 'Загрузка из OpenStreetMap: сначала список границ, затем их полигоны. Обычно занимает меньше минуты.'),
+      rowsEl, h('div', { class: 'progress' }, bar), stage),
   });
+  const ICON = { ok: 'checkCircle', run: 'refresh', wait: 'help', fail: 'xCircle' };
+  const show = (job) => {
+    clear(rowsEl);
+    let frac = 0;
+    for (const [kind, title] of [['okrug', 'Округа'], ['area', 'Районы и поселения']]) {
+      const c = job[kind] || {};
+      const state = c.state === 'ok' ? 'ok' : job.state === 'error' && c.via ? 'fail' : c.via ? 'run' : 'wait';
+      const part = c.state === 'ok' ? 1 : c.listed ? (c.got || 0) / c.listed : 0;
+      frac += part / 2;
+      const text = state === 'wait' ? 'ожидает'
+        : state === 'ok' ? `получено ${fmt.int(c.got)} ${plural(c.got, 'граница', 'границы', 'границ')}`
+          : c.listed ? `${c.via}: получено ${fmt.int(c.got || 0)} из ${fmt.int(c.listed)} (${Math.floor(part * 100)}%)` : `${c.via}...`;
+      rowsEl.append(h('li', { class: `run-step ${state}` }, h('span', { class: 'ic' }, icon(ICON[state], 16)),
+        h('div', null, h('b', null, title), h('div', { class: 'small ink2' }, text))));
+    }
+    bar.style.width = `${Math.max(3, Math.round(frac * 100))}%`;
+    stage.textContent = job.stage || '';
+  };
   try {
     const areas = [...new Set(app.state.rows.map((r) => r.area).filter(Boolean))];
     await postJson('api/boundaries/download', { areas, email: app.settings.nominatimEmail || '' });
-    const st = await waitJob('api/boundaries', (s) => { stage.textContent = (s.job && s.job.stage) || 'Загрузка'; });
+    const st = await waitJob('api/boundaries', (s) => show(s.job || {}));
     if (st.job.state !== 'done') throw new Error(st.job.message || 'границы не получены');
     const n = await applyBoundaryFiles(st);
     toast(`Границы загружены: округов ${n.okrug}, районов ${n.area}${n.unmatched ? `; без сопоставления с МЖИ: ${n.unmatched}` : ''}`, 'ok', 7000);

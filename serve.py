@@ -9,6 +9,7 @@
     и сохраняет найденные координаты в data/local/geocoded_houses.csv;
   * ищет оставшиеся дома через Яндекс Геокодер, если указан ключ API (tools/yandex_geocoder.py);
   * скачивает границы округов и районов Москвы для заливки карты (tools/osm_boundaries.py);
+  * читает адресный реестр Москвы с data.mos.ru для координат домов по UNOM (tools/mos_registry.py);
   * слушает только 127.0.0.1 (данные не видны в локальной сети);
   * правильные MIME-типы для .js/.mjs/.pmtiles/.geojson и отключённый кэш для файлов приложения;
   * локальный API «Папка с выгрузками»: приложение читает ваши файлы прямо с диска по путям из
@@ -37,6 +38,7 @@ import basemap  # noqa: E402
 import osm_addresses  # noqa: E402
 import yandex_geocoder  # noqa: E402
 import osm_boundaries  # noqa: E402
+import mos_registry  # noqa: E402
 
 DEFAULT_CONFIG = ROOT / "config" / "sources.default.json"
 LOCAL_CONFIG = Path(os.environ.get("MCA_SOURCES_CONFIG") or (ROOT / "config" / "sources.local.json"))
@@ -57,6 +59,7 @@ GEOCODED_FILE = ROOT / "data" / "local" / "geocoded_houses.csv"
 YANDEX_SETTINGS = Path(os.environ.get("MCA_GEOCODER_CONFIG") or yandex_geocoder.SETTINGS)
 YANDEX_CACHE = yandex_geocoder.CACHE
 BOUNDARIES_DIR = osm_boundaries.OUT_DIR
+MOSREG_FILE = mos_registry.OUTPUT
 
 
 # ---------------------------------------------------------------- настройки источников
@@ -302,6 +305,33 @@ def start_yandex(data):
     return True
 
 
+MOS_JOB = basemap.Progress()
+_mos_thread = None
+
+
+def mosreg_state():
+    st = mos_registry.public_state(YANDEX_SETTINGS, MOSREG_FILE)
+    st["job"] = MOS_JOB.snapshot()
+    return st
+
+
+def start_mosreg(data):
+    global _mos_thread
+    unoms = data.get("unoms") if isinstance(data, dict) else None
+    unoms = [str(u)[:20] for u in unoms[:500000]] if isinstance(unoms, list) else []
+    with _basemap_lock:
+        if _mos_thread and _mos_thread.is_alive():
+            return False
+        MOS_JOB.reset()
+        MOS_JOB.set(state="running", stage="Подготовка")
+        kwargs = {"unoms": unoms, "settings_path": YANDEX_SETTINGS, "out": MOSREG_FILE}
+        if os.environ.get("MCA_MOSDATA_URL"):
+            kwargs["pause"] = 0
+        _mos_thread = threading.Thread(target=mos_registry.download, args=(MOS_JOB,), kwargs=kwargs, daemon=True)
+        _mos_thread.start()
+    return True
+
+
 BND_JOB = basemap.Progress()
 _bnd_thread = None
 
@@ -395,7 +425,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if route not in ("/api/sources", "/api/open-folder", "/api/basemap/download", "/api/basemap/cancel",
                          "/api/addresses/download", "/api/addresses/cancel", "/api/geocoded",
                          "/api/yandex/settings", "/api/yandex/start", "/api/yandex/cancel",
-                         "/api/boundaries/download", "/api/boundaries/cancel"):
+                         "/api/boundaries/download", "/api/boundaries/cancel",
+                         "/api/mosreg/settings", "/api/mosreg/download", "/api/mosreg/cancel"):
             return self._json(404, {"error": "Нет такого метода"})
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json(415, {"error": "Нужен Content-Type: application/json"})
@@ -403,11 +434,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._open_folder()
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length > (64 * 1024 * 1024 if route in ("/api/geocoded", "/api/yandex/start") else 65536):
+            if length > (64 * 1024 * 1024 if route in ("/api/geocoded", "/api/yandex/start", "/api/mosreg/download") else 65536):
                 return self._json(413, {"error": "Слишком большой запрос"})
             data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if route == "/api/geocoded":
                 return self._json(200, save_geocoded(data))
+            if route == "/api/mosreg/settings":
+                mos_registry.save_settings(data if isinstance(data, dict) else {}, YANDEX_SETTINGS)
+                return self._json(200, mosreg_state())
+            if route == "/api/mosreg/cancel":
+                MOS_JOB.cancel.set()
+                return self._json(200, mosreg_state())
+            if route == "/api/mosreg/download":
+                if not start_mosreg(data):
+                    return self._json(409, {"error": "Загрузка реестра уже идёт", **mosreg_state()})
+                return self._json(202, mosreg_state())
             if route == "/api/boundaries/cancel":
                 BND_JOB.cancel.set()
                 return self._json(200, boundaries_state())
@@ -479,6 +520,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(200, yandex_state())
         if path == "/api/boundaries":
             return self._json(200, boundaries_state())
+        if path == "/api/mosreg":
+            return self._json(200, mosreg_state())
         if path == "/api/yandex/results":
             return self._json(200, {"results": dict(getattr(YA_JOB, "results", {}) or {})})
         m = re.fullmatch(r"/api/source/([a-z]+)", path)

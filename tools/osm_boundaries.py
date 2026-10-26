@@ -205,7 +205,14 @@ def feature(name, geometry, osm_id="", level="", source=""):
 
 # ---------------------------------------------------------------- источники полигонов
 
-def nominatim_lookup(rels, base, email="", progress=None, pause=1.1):
+def _count(progress, kind, **kw):
+    """Ход загрузки для приложения: сколько границ в списке, сколько полигонов уже получено и откуда."""
+    if progress is not None and kind:
+        with progress.lock:
+            progress.extra[kind] = {**progress.extra.get(kind, {}), **kw}
+
+
+def nominatim_lookup(rels, base, email="", progress=None, pause=1.1, kind=""):
     """rels: [{id, name, admin_level}] → признаки с полигонами (пачками по 40 номеров)."""
     out = []
     for i in range(0, len(rels), 40):
@@ -225,12 +232,13 @@ def nominatim_lookup(rels, base, email="", progress=None, pause=1.1):
             if rid in names and g.get("type") in ("Polygon", "MultiPolygon"):
                 r = names[rid]
                 out.append(feature(r["name"], g, rid, r["admin_level"], "OSM, Nominatim"))
+        _count(progress, kind, got=len(out))
         if pause and i + 40 < len(rels):
             time.sleep(pause)
     return out
 
 
-def nominatim_search(names, prefixes, base, email="", progress=None, pause=1.1):
+def nominatim_search(names, prefixes, base, email="", progress=None, pause=1.1, kind=""):
     """Запасной путь без Overpass: граница по названию («район Арбат, Москва» и т. п.)."""
     out, missing = [], []
     for n, name in enumerate(names):
@@ -259,12 +267,14 @@ def nominatim_search(names, prefixes, base, email="", progress=None, pause=1.1):
             out.append(found)
         else:
             missing.append(name)
+        _count(progress, kind, got=len(out), checked=n + 1)
     return out, missing
 
 
 def fetch_kind(kind, endpoints, base, names, email, progress, pause):
     level = LEVELS[kind]
     label = "округов" if kind == "okrug" else "районов"
+    _count(progress, kind, listed=0, got=0, via="список границ (Overpass)", state="run")
     try:
         progress.set(stage="Список границ %s (Overpass)" % label)
         data = overpass(list_query(level), endpoints, progress)
@@ -274,19 +284,21 @@ def fetch_kind(kind, endpoints, base, names, email, progress, pause):
             raise BoundaryError("Overpass не вернул границ %s" % label)
     except BoundaryError:
         progress.set(stage="Overpass недоступен, поиск границ %s по названиям (Nominatim)" % label)
-        if kind == "okrug":
-            feats, _ = nominatim_search(["%s административный округ" % n for n in OKRUG_NAMES], [""], base, email, progress, pause)
-        else:
-            feats, _ = nominatim_search(names or DEFAULT_AREAS, ["район", "поселение", "городской округ", ""], base, email, progress, pause)
+        src = ["%s административный округ" % n for n in OKRUG_NAMES] if kind == "okrug" else (names or DEFAULT_AREAS)
+        _count(progress, kind, listed=len(src), got=0, via="поиск по названиям (Nominatim)")
+        prefixes = [""] if kind == "okrug" else ["район", "поселение", "городской округ", ""]
+        feats, _ = nominatim_search(src, prefixes, base, email, progress, pause, kind)
         return feats
+    _count(progress, kind, listed=len(rels), got=0, via="полигоны (Nominatim)")
     try:
         progress.set(stage="Полигоны %s (Nominatim)" % label)
-        feats = nominatim_lookup(rels, base, email, progress, pause)
+        feats = nominatim_lookup(rels, base, email, progress, pause, kind)
         if len(feats) >= len(rels) * 0.8:
             return feats
     except (OSError, ValueError):
         pass
     progress.set(stage="Полигоны %s (Overpass)" % label)
+    _count(progress, kind, got=0, via="полигоны (Overpass)")
     data = overpass(geom_query(level), endpoints, progress)
     feats = []
     for e in data.get("elements", []):
@@ -308,6 +320,7 @@ def download(progress, out_dir=OUT_DIR, areas=None, email="", endpoints=None, no
     try:
         for i, kind in enumerate(("okrug", "area")):
             feats = fetch_kind(kind, eps, base, [a for a in (areas or []) if a], email, progress, pause)
+            _count(progress, kind, got=len(feats), state="ok")
             if not feats:
                 raise BoundaryError("Не удалось получить границы %s" % ("округов" if kind == "okrug" else "районов"))
             doc = {"type": "FeatureCollection", "features": feats,

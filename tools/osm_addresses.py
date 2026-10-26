@@ -154,6 +154,7 @@ def download(progress, out=OUTPUT, endpoints=None, bbox=MOSCOW_BBOX, grid=GRID, 
                 progress.set(total=done + len(queue))
                 continue
             done += 1
+            progress.extra["addresses"] = len(rows)
             progress.set(done=done, total=done + len(queue))
             if pause and queue:
                 time.sleep(pause)  # бережём общий сервер

@@ -204,9 +204,17 @@ export function parseGeoFile(name, text, sourceLabel = '') {
   const warnings = [];
   const src = sourceLabel || `импорт: ${name}`;
   const now = new Date().toISOString();
-  if (/\.(geo)?json$/i.test(name) || /^\s*\{/.test(text)) {
+  if (/\.(geo)?json$/i.test(name) || /^\s*[{[]/.test(text)) {
     const gj = JSON.parse(text);
-    const feats = gj.type === 'FeatureCollection' ? gj.features : gj.type === 'Feature' ? [gj] : [];
+    // Выгрузка адресного реестра с data.mos.ru: массив записей с UNOM, geoData (контур) и geodata_center (центр)
+    const fromMos = (x) => {
+      const c = x.Cells || x;
+      const geo = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch (_) { return null; } })() : v);
+      const shape = geo(c.geoData);
+      const center = geo(c.geodata_center);
+      return { type: 'Feature', properties: { UNOM: c.UNOM, source: 'Адресный реестр Москвы, data.mos.ru', accuracy: 'реестр Москвы, UNOM совпал', _center: center }, geometry: shape || center };
+    };
+    const feats = Array.isArray(gj) ? gj.map(fromMos) : gj.type === 'FeatureCollection' ? gj.features : gj.type === 'Feature' ? [gj] : [];
     for (const f of feats) {
       const p = f.properties || {};
       const unomRaw = p.unom ?? p.UNOM ?? p.Unom ?? p['УНОМ'];
@@ -216,7 +224,8 @@ export function parseGeoFile(name, text, sourceLabel = '') {
       if (f.geometry.type === 'Point') [lon, lat] = f.geometry.coordinates;
       else if (/Polygon/.test(f.geometry.type)) {
         building = f.geometry;
-        const c = centroidOf(f.geometry);
+        const center = p._center && p._center.type === 'Point' ? p._center.coordinates : null;
+        const c = center ? { lon: center[0], lat: center[1] } : centroidOf(f.geometry);
         lat = c.lat; lon = c.lon;
       } else { warnings.push(`UNOM ${unomRaw}: геометрия ${f.geometry.type} не поддерживается`); continue; }
       if (!inMoscow(lat, lon)) { warnings.push(`UNOM ${unomRaw}: координаты вне Москвы`); continue; }

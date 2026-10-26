@@ -67,7 +67,23 @@ const ADDRESSES = join(ROOT, 'data', 'local', 'osm', 'moscow_addresses.json');
 const GEOCODED = join(ROOT, 'data', 'local', 'geocoded_houses.csv');
 const BOUNDS = ['okrug', 'area'].map((k) => join(ROOT, 'data', 'local', 'osm', `boundaries_${k}.geojson`));
 const BOUNDS_TEST = BOUNDS.every((f) => !existsSync(f));
-const GEOCODE_TEST = !existsSync(ADDRESSES) && !existsSync(GEOCODED) && !existsSync(join(ROOT, 'data', 'local', 'yandex_geocoder_cache.json'));
+const MOSREG = join(ROOT, 'data', 'local', 'mos_registry.json');
+const GEOCODE_TEST = !existsSync(ADDRESSES) && !existsSync(GEOCODED) && !existsSync(MOSREG) && !existsSync(join(ROOT, 'data', 'local', 'yandex_geocoder_cache.json'));
+// Имитация apidata.mos.ru: адресный реестр с каждым третьим домом синтетического реестра МЖИ (точно по UNOM)
+function mosDataServer(unoms) {
+  const items = unoms.map((u, i) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [37.45 + (i % 20) * 0.01, 55.65 + Math.floor(i / 20) * 0.01] }, properties: { Attributes: { UNOM: Number(u), geodata_center: { type: 'Point', coordinates: [37.45 + (i % 20) * 0.01, 55.65 + Math.floor(i / 20) * 0.01] } } } }));
+  for (let i = 0; i < 1500; i++) items.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [37.7, 55.8] }, properties: { Attributes: { UNOM: 9000000 + i } } }); // прочие здания
+  return new Promise((res) => {
+    const srv = http.createServer((req, resp) => {
+      const u = new URL(req.url, 'http://x');
+      resp.writeHead(200, { 'Content-Type': 'application/json' });
+      if (u.pathname.endsWith('/count')) { resp.end(String(items.length)); return; }
+      const skip = Number(u.searchParams.get('$skip')); const top = Number(u.searchParams.get('$top'));
+      resp.end(JSON.stringify({ type: 'FeatureCollection', features: items.slice(skip, skip + top) }));
+    });
+    srv.listen(0, '127.0.0.1', () => res(srv));
+  });
+}
 function overpassElements() {
   const m = readCsv(join(FIX, 'mji_synthetic.csv'));
   const iA = m.header.indexOf('Наименование/адрес');
@@ -121,12 +137,12 @@ function osmServer(elements, relations) {
       req.on('end', () => {
         resp.writeHead(200, { 'Content-Type': 'application/json' });
         const u = new URL(req.url, 'http://x');
-        if (u.pathname.endsWith('/lookup')) { // Nominatim: квадраты по сетке над Москвой
+        if (u.pathname.endsWith('/lookup')) { // Nominatim: квадраты по сетке над Москвой (с задержкой, чтобы был виден ход)
           const ids = u.searchParams.get('osm_ids').split(',').map((x) => Number(x.slice(1)));
-          resp.end(JSON.stringify({ type: 'FeatureCollection', features: ids.map((id) => {
+          setTimeout(() => resp.end(JSON.stringify({ type: 'FeatureCollection', features: ids.map((id) => {
             const x = 37.3 + (id % 10) * 0.07; const y = 55.55 + (Math.floor(id / 10) % 6) * 0.07;
             return { type: 'Feature', properties: { osm_type: 'relation', osm_id: id }, geometry: { type: 'Polygon', coordinates: [[[x, y], [x + 0.06, y], [x + 0.06, y + 0.06], [x, y + 0.06], [x, y]]] } };
-          }) }));
+          }) })), 1500);
           return;
         }
         const q = new URLSearchParams(data).get('data') || '';
@@ -217,12 +233,15 @@ function prepareSourceFolder() {
   const m0 = readCsv(join(FIX, 'mji_synthetic.csv'));
   const ambAddr = m0.rows.filter((r) => osm.plan.get(r[m0.header.indexOf('UNOM')]) === 'ambiguous').map((r) => r[m0.header.indexOf('Наименование/адрес')]);
   const yandex = await yandexServer(ambAddr);
+  const mosUnoms = m0.rows.map((r) => r[m0.header.indexOf('UNOM')]).filter((u, i) => i % 3 === 0);
+  const mosdata = await mosDataServer(mosUnoms);
   const port = await freePort();
   const server = await startServer(port, {
     MCA_BASEMAP_SOURCE: `http://127.0.0.1:${tileServer.address().port}/planet.pmtiles`,
     MCA_OVERPASS_URL: `http://127.0.0.1:${overpass.address().port}/api/interpreter`,
     MCA_NOMINATIM_URL: `http://127.0.0.1:${overpass.address().port}/nominatim`,
     MCA_YANDEX_URL: `http://127.0.0.1:${yandex.address().port}/1.x/`,
+    MCA_MOSDATA_URL: `http://127.0.0.1:${mosdata.address().port}/v1`,
     MCA_GEOCODER_CONFIG: GEOCODER_CONFIG,
   });
   const browser = await chromium.launch();
@@ -387,48 +406,62 @@ function prepareSourceFolder() {
     assert.deepEqual(await uiKpi(page), k, 'KPI после восстановления из полной копии');
     log(`резервная копия: ${restored.restored} записей, ${restored.size} байт - восстановлено без потерь`);
 
-    // 7) Координаты всех домов одной кнопкой: справочник OSM скачивается сам, остаток ищется через Яндекс
+    // 7) Координаты домов: выбор источников (реестр Москвы по UNOM, OpenStreetMap, Яндекс), ключи в окне
     if (GEOCODE_TEST) {
       const kept = new Set(matched.map((r) => r.ur));
-      const expectOsm = exp.rows.filter((r) => osm.plan.get(r.ur) === 'ok' && !kept.has(r.ur)).length;
-      const ambiguousU = [...osm.plan].filter(([, v]) => v === 'ambiguous').map(([u]) => u);
+      const mos = new Set(mosUnoms.filter((u) => !kept.has(u)));
+      const expectOsm = exp.rows.filter((r) => osm.plan.get(r.ur) === 'ok' && !kept.has(r.ur) && !mos.has(r.ur)).length;
+      const ambiguousLeft = [...osm.plan].filter(([u, v]) => v === 'ambiguous' && !kept.has(u) && !mos.has(u)).length;
       await page.click('.nav-item[data-view="import"]');
       await page.click('#view-import button:has-text("Найти координаты всех домов")');
-      await page.waitForSelector('.modal :text("Яндекс Геокодер: указать ключ API")');
-      await page.click('.modal summary');
-      await page.fill('.modal input[aria-label="Ключ API Яндекс Геокодера"]', 'test-key-1234');
-      await page.click('.modal button:has-text("Сохранить")');
-      await page.waitForSelector('.modal :text("ключ …1234")');
-      await page.click('.modal button.btn-block:has-text("Найти координаты всех домов")');
-      await page.waitForSelector('.modal :text("С координатами")', { timeout: 90000 });
+      await page.waitForSelector('.modal .src-row');
+      assert.equal(await page.isChecked('.modal input[aria-label="OpenStreetMap"]'), true, 'OpenStreetMap выбран по умолчанию');
+      for (const [title, key] of [['Адресный реестр Москвы (data.mos.ru)', 'mos-test-key-5678'], ['Яндекс Геокодер', 'test-key-1234']]) {
+        const row = page.locator('.modal .src-row', { hasText: title });
+        await row.locator('a:has-text("Указать ключ")').click();
+        await page.fill(`.modal input[aria-label="Ключ API: ${title}"]`, key);
+        await row.locator('button:has-text("Сохранить")').click();
+        await page.waitForFunction((t) => [...document.querySelectorAll('.modal .src-row')].some((r) => r.innerText.includes(t) && /сохранён/.test(r.innerText)), title);
+        assert.equal(await page.isChecked(`.modal input[aria-label="${title}"]`), true, 'с ключом источник включается');
+      }
+      await page.click('.modal button.btn-block:has-text("Найти координаты")');
+      await page.waitForSelector('.modal :text("С координатами")', { timeout: 120000 });
       await page.screenshot({ path: join(OUT, '10_geocode.png') });
+      const text = await page.evaluate(() => document.querySelector('.modal').innerText);
+      assert.match(text, /найдено по UNOM: \d+/);
+      assert.match(text, /справочник: \d+ адресов/);
       const geo = await page.evaluate(() => {
         const by = {};
         for (const g of window.__app.state.geo.values()) by[g.status] = (by[g.status] || 0) + 1;
         return by;
       });
       assert.equal(geo.imported, 6, 'точки из файла не перезаписаны');
-      assert.equal(geo.osm, expectOsm, 'по адресам OSM найдены все однозначные адреса');
-      // Яндекс нашёл остальные, кроме адреса, для которого вернул только улицу
-      assert.equal(geo.yandex, k.mkd - 6 - expectOsm - ambiguousU.length, 'остальные найдены через Яндекс');
-      const total = 6 + geo.osm + geo.yandex;
+      assert.equal(geo.mosreg, mos.size, 'реестр Москвы: все дома с UNOM в реестре');
+      assert.equal(geo.osm, expectOsm, 'OpenStreetMap: однозначные адреса из оставшихся');
+      assert.equal(geo.yandex, k.mkd - 6 - mos.size - expectOsm - ambiguousLeft, 'Яндекс: остальные, кроме ответа «улица»');
+      const total = 6 + geo.mosreg + geo.osm + geo.yandex;
       const csvLines = readFileSync(GEOCODED, 'utf8').trim().split(/\r?\n/);
       assert.equal(csvLines.length, total + 1, 'копия координат сохранена в data/local/geocoded_houses.csv');
-      assert.ok(!JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/yandex`)).json()).includes('test-key'), 'ключ не отдаётся наружу');
+      for (const api of ['yandex', 'mosreg']) {
+        const pub = JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/${api}`)).json());
+        assert.ok(!pub.includes('test-key'), `ключ ${api} не отдаётся наружу`);
+      }
       await page.click('.modal button:has-text("Закрыть")');
       await page.click('.nav-item[data-view="map"]');
       await page.evaluate(() => { window.__app.map.map.setView([55.75, 37.6], 10); });
       await page.waitForTimeout(800);
       await page.screenshot({ path: join(OUT, '11_map_geocoded.png') });
-      log(`координаты одной кнопкой: OSM ${geo.osm}, Яндекс ${geo.yandex}, вручную 6; всего ${total} из ${k.mkd}`);
+      log(`координаты: реестр Москвы ${geo.mosreg}, OSM ${geo.osm}, Яндекс ${geo.yandex}, вручную 6; всего ${total} из ${k.mkd}`);
     } else {
-      log('координаты по адресам: справочник или geocoded_houses.csv уже есть, проверка пропущена');
+      log('координаты: справочник, реестр или geocoded_houses.csv уже есть, проверка пропущена');
     }
 
     // 8) Границы округов и районов одной кнопкой (список из Overpass, полигоны из Nominatim), сохраняются на диск
     if (BOUNDS_TEST) {
       await page.click('.nav-item[data-view="import"]');
       await page.click('#view-import button:has-text("Загрузить границы округов и районов")');
+      await page.waitForSelector('.modal .run-step:has-text("получено")', { timeout: 30000 });
+      await page.screenshot({ path: join(OUT, '12a_boundaries_progress.png') });
       await page.waitForSelector('.toast:has-text("Границы загружены")', { timeout: 60000 });
       const b = await page.evaluate(() => {
         const s = window.__app.state.boundaries;
@@ -461,8 +494,9 @@ function prepareSourceFolder() {
     tileServer.close();
     overpass.close();
     yandex.close();
+    mosdata.close();
     if (BASEMAP_TEST) for (const f of [BASEMAP, `${BASEMAP}.json`]) rmSync(f, { force: true });
-    if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED, YANDEX_CACHE]) rmSync(f, { force: true });
+    if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED, YANDEX_CACHE, MOSREG]) rmSync(f, { force: true });
     if (BOUNDS_TEST) for (const f of BOUNDS) rmSync(f, { force: true });
     try { rmdirSync(join(ROOT, 'data', 'local', 'osm')); } catch (_) { /* папка не пуста или её нет */ }
     rmSync(SRC_DIR, { recursive: true, force: true });
