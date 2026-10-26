@@ -398,7 +398,7 @@ function renderMapView() {
     ctx.overlay = h('div', null, h('h3', null, 'На карте пока нет домов'),
       h('div', { class: 'ink2 small' }, `Координаты есть у ${fmt.int(geoInScope)} из ${fmt.int(rows.length)} МКД в выбранной области. Дома без геопозиции доступны в таблице, поиске и рейтингах. Случайные точки приложение не ставит.`),
       h('div', { class: 'actions' },
-        h('button', { class: 'btn btn-sm btn-primary', onclick: () => openGeocodeDialog(app) }, icon('pin', 14), 'Найти координаты домов'),
+        h('button', { class: 'btn btn-sm btn-primary', onclick: () => openGeocodeDialog(app, { autostart: true }) }, icon('pin', 14), 'Найти координаты всех домов'),
         h('button', { class: 'btn btn-sm', onclick: () => go('import') }, icon('upload', 14), 'Импорт координат'),
         !app.state.boundaries.okrug ? h('button', { class: 'btn btn-sm', onclick: () => loadBoundaries('okrug') }, icon('layers', 14), 'Границы округов (OSM)') : null));
   }
@@ -444,7 +444,7 @@ function renderStartMap(v) {
     h('ol', { class: 'start-steps' },
       item('Реестр МЖИ', 'число домов по округам и районам', !!st.snapMji),
       item('Выгрузки ЕДЦ', 'запросы № 2, 3 и 4: доли покрытия и рейтинг', !!st.snapEdc),
-      item('Координаты домов', 'по адресам OpenStreetMap, кнопка появится после загрузки реестра', st.geo.size > 0)),
+      item('Координаты домов', 'одной кнопкой «Найти координаты всех домов» после загрузки реестра', st.geo.size > 0)),
     h('div', { class: 'stack', style: { gap: '8px' } },
       src ? h('button', { class: 'btn btn-primary btn-block', onclick: () => openSourcesDialog(app) }, icon('database', 16), 'Загрузить из папки выгрузок') : null,
       src ? h('div', { class: 'small muted wrap' }, src.folderExists ? `Папка: ${src.folderResolved}, найдено файлов: ${found}` : `Папка не найдена: ${src.folderResolved || src.folder}`) : null,
@@ -482,6 +482,7 @@ function dataNotesCard(k, rows) {
     h('h3', null, 'Источник и полнота'),
     h('div', { class: 'small ink2' }, `Срез МЖИ: ${fmt.date(st.snapMji && st.snapMji.dataDate)}, ЕДЦ: ${st.snapEdc ? fmt.date(st.snapEdc.dataDate) : 'нет'}.`),
     h('div', { class: 'small ink2' }, `На карте ${fmt.int(rows.filter((r) => st.geo.has(r.u)).length)} из ${fmt.int(rows.length)} МКД (только дома с сохранённой геопозицией).`),
+    rows.some((r) => !st.geo.has(r.u)) ? h('button', { class: 'btn btn-sm btn-primary btn-block', onclick: () => openGeocodeDialog(app, { autostart: true }) }, icon('pin', 14), 'Найти координаты всех домов') : null,
     !st.boundaries.okrug ? h('div', { class: 'small' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); loadBoundaries('okrug'); } }, 'Загрузить границы округов из OSM'), ' для заливки на карте.') : null);
 }
 
@@ -516,7 +517,7 @@ function renderHeatView() {
   } else if (!info.pts.length) {
     ctx.overlay = h('div', null, h('h3', null, 'Нет геокодированных домов с заявками'),
       h('div', { class: 'small ink2' }, `Заявки есть у ${fmt.int(info.withReq)} домов, а координаты только у ${fmt.int(info.geoWithReq)}. Тепловая карта не экстраполирует данные на Москву.`),
-      h('div', { class: 'actions' }, h('button', { class: 'btn btn-sm btn-primary', onclick: () => openGeocodeDialog(app) }, icon('pin', 14), 'Найти координаты домов')));
+      h('div', { class: 'actions' }, h('button', { class: 'btn btn-sm btn-primary', onclick: () => openGeocodeDialog(app, { autostart: true }) }, icon('pin', 14), 'Найти координаты всех домов')));
   }
   app.map.update(ctx);
   side.append(h('div', { class: 'card stack' },
@@ -659,7 +660,7 @@ function areaTable() {
 
 // ---------------------------------------------------------------- вид «Дома и подъезды»
 
-const GEO_LABEL = { '': 'Любая', none: 'Нет координат', any: 'Есть координаты', osm: 'OSM по адресу', auto: 'Геокодер (не проверено)', verified: 'Проверено', manual: 'Вручную', imported: 'Из файла', review: 'Требует проверки' };
+const GEO_LABEL = { '': 'Любая', none: 'Нет координат', any: 'Есть координаты', osm: 'OSM по адресу', yandex: 'Яндекс Геокодер', auto: 'Геокодер (не проверено)', verified: 'Проверено', manual: 'Вручную', imported: 'Из файла', review: 'Требует проверки' };
 
 function filteredHouses() {
   const t = app.ui.table;
@@ -755,7 +756,7 @@ function renderHouses() {
         h('td', null, statusBadge(r.cov), r.na ? h('div', { class: 'sub' }, NA_REASON[r.na]) : null),
         h('td', { class: 'r' }, r.e ? `${fmt.int(Math.min(r.e.el, r.e.et))} / ${fmt.int(r.e.et)}` : na()),
         h('td', { class: 'r' }, r.q ? fmt.int(reqValue(r, 'total', q)) : na()),
-        h('td', null, g ? h('span', { class: `chip ${g.status === 'auto' || g.review ? 'warn' : ''}` }, { manual: 'вручную', verified: 'проверено', auto: 'проверить', imported: 'файл', osm: 'OSM' }[g.status] || g.status) : na()));
+        h('td', null, g ? h('span', { class: `chip ${g.status === 'auto' || g.review ? 'warn' : ''}` }, { manual: 'вручную', verified: 'проверено', auto: 'проверить', imported: 'файл', osm: 'OSM', yandex: 'Яндекс' }[g.status] || g.status) : na()));
     })));
   v.append(h('div', { class: 'table-wrap' }, tbl));
   v.append(h('div', { class: 'pager' },
@@ -841,7 +842,7 @@ function sourceCardGeo() {
   const buildings = [...st.geo.values()].filter((g) => g.building).length;
   return srcCard('Геоданные (ручная работа)', st.geo.size > 0, [
     `${fmt.int(st.geo.size)} домов с координатами, ${fmt.int(buildings)} контуров, ${fmt.int(st.zones.length)} зон подъездов`,
-    Object.entries(by).map(([k, n]) => `${{ manual: 'вручную', verified: 'проверено', auto: 'требует проверки', imported: 'из файла', osm: 'OSM по адресу' }[k] || k}: ${fmt.int(n)}`).join(', ') || 'Хранятся отдельно от ежемесячных выгрузок.',
+    Object.entries(by).map(([k, n]) => `${{ manual: 'вручную', verified: 'проверено', auto: 'требует проверки', imported: 'из файла', osm: 'OSM по адресу', yandex: 'Яндекс Геокодер' }[k] || k}: ${fmt.int(n)}`).join(', ') || 'Хранятся отдельно от ежемесячных выгрузок.',
     `Ручных соответствий МЖИ и ЕДЦ: ${fmt.int(st.overrides.size)}`]);
 }
 
@@ -921,9 +922,9 @@ function historyCard() {
 function geoToolsCard() {
   const fileIn = h('input', { type: 'file', accept: '.csv,.geojson,.json', class: 'hidden', onchange: (e) => app.importGeoFiles([...e.target.files]) });
   return h('div', { class: 'card stack' }, h('div', { class: 'card-head' }, h('h3', null, 'Геопривязка'), h('span', { class: 'sub' }, 'отдельно от ежемесячных выгрузок')),
-    h('div', { class: 'small ink2' }, 'Координаты всех домов реестра находятся по адресам зданий OpenStreetMap: справочник адресов скачивается один раз, поиск идёт на этом компьютере.'),
+    h('div', { class: 'small ink2' }, 'Одна кнопка находит координаты всех домов реестра: по адресам OpenStreetMap, а оставшиеся через Яндекс Геокодер, если указан ключ.'),
     h('div', { class: 'actions-row' },
-      h('button', { class: 'btn btn-primary', disabled: !hasMji(), onclick: () => openGeocodeDialog(app) }, icon('pin', 16), 'Координаты всех домов'),
+      h('button', { class: 'btn btn-primary', onclick: () => openGeocodeDialog(app) }, icon('pin', 16), 'Найти координаты всех домов'),
       h('button', { class: 'btn', onclick: () => batchGeocodeDialog() }, icon('search', 16), 'Район через Nominatim'),
       h('button', { class: 'btn', onclick: () => fileIn.click() }, icon('upload', 16), 'Импорт CSV/GeoJSON'),
       h('button', { class: 'btn', onclick: exportGeo, disabled: !app.state.geo.size && !app.state.zones.length }, icon('download', 16), 'Экспорт GeoJSON')),

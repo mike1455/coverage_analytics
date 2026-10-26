@@ -64,7 +64,7 @@ function rangeServer(file) {
 // (другой порядок слов, «Ё», заглавные буквы в номере). Часть домов пропущена, один адрес неоднозначен.
 const ADDRESSES = join(ROOT, 'data', 'local', 'osm', 'moscow_addresses.json');
 const GEOCODED = join(ROOT, 'data', 'local', 'geocoded_houses.csv');
-const GEOCODE_TEST = !existsSync(ADDRESSES) && !existsSync(GEOCODED);
+const GEOCODE_TEST = !existsSync(ADDRESSES) && !existsSync(GEOCODED) && !existsSync(join(ROOT, 'data', 'local', 'yandex_geocoder_cache.json'));
 function overpassElements() {
   const m = readCsv(join(FIX, 'mji_synthetic.csv'));
   const iA = m.header.indexOf('Наименование/адрес');
@@ -79,12 +79,29 @@ function overpassElements() {
     const lat = 55.55 + (i % 40) * 0.008;
     const lon = 37.35 + Math.floor(i / 40) * 0.05;
     els.push({ type: 'way', id: 1000 + i, center: { lat, lon }, tags: { building: 'yes', 'addr:street': street, 'addr:housenumber': hn } });
-    if (i === 10) {
+    if (i === 11) {
       els.push({ type: 'way', id: 9000, center: { lat: lat + 0.2, lon }, tags: { building: 'yes', 'addr:street': street, 'addr:housenumber': hn } });
       plan.set(r[iU], 'ambiguous');
     } else plan.set(r[iU], streetBag(p.street) && p.keys.length ? 'ok' : 'unparsed');
   });
   return { els, plan };
+}
+// Имитация HTTP Геокодера Яндекса: дом по любому адресу, кроме одного (для него только улица)
+const GEOCODER_CONFIG = join(SRC_DIR, 'geocoder.local.json');
+const YANDEX_CACHE = join(ROOT, 'data', 'local', 'yandex_geocoder_cache.json');
+function yandexServer(streetOnly) {
+  return new Promise((res) => {
+    const srv = http.createServer((req, resp) => {
+      const q = new URL(req.url, 'http://x').searchParams.get('geocode') || '';
+      let n = 0;
+      for (const ch of q) n = (n * 31 + ch.charCodeAt(0)) % 100000;
+      const kind = streetOnly.some((a) => q.endsWith(a)) ? 'street' : 'house';
+      const member = { GeoObject: { metaDataProperty: { GeocoderMetaData: { precision: kind === 'house' ? 'exact' : 'street', kind, text: q } }, Point: { pos: `${(37.4 + (n % 400) / 1000).toFixed(5)} ${(55.6 + (n % 300) / 1000).toFixed(5)}` } } };
+      resp.writeHead(200, { 'Content-Type': 'application/json' });
+      resp.end(JSON.stringify({ response: { GeoObjectCollection: { featureMember: [member] } } }));
+    });
+    srv.listen(0, '127.0.0.1', () => res(srv));
+  });
 }
 function overpassServer(elements) {
   const body = JSON.stringify({ version: 0.6, elements });
@@ -172,10 +189,15 @@ function prepareSourceFolder() {
   const tileServer = await rangeServer(planet);
   const osm = overpassElements();
   const overpass = await overpassServer(osm.els);
+  const m0 = readCsv(join(FIX, 'mji_synthetic.csv'));
+  const ambAddr = m0.rows.filter((r) => osm.plan.get(r[m0.header.indexOf('UNOM')]) === 'ambiguous').map((r) => r[m0.header.indexOf('Наименование/адрес')]);
+  const yandex = await yandexServer(ambAddr);
   const port = await freePort();
   const server = await startServer(port, {
     MCA_BASEMAP_SOURCE: `http://127.0.0.1:${tileServer.address().port}/planet.pmtiles`,
     MCA_OVERPASS_URL: `http://127.0.0.1:${overpass.address().port}/api/interpreter`,
+    MCA_YANDEX_URL: `http://127.0.0.1:${yandex.address().port}/1.x/`,
+    MCA_GEOCODER_CONFIG: GEOCODER_CONFIG,
   });
   const browser = await chromium.launch();
   const errors = [];
@@ -339,28 +361,40 @@ function prepareSourceFolder() {
     assert.deepEqual(await uiKpi(page), k, 'KPI после восстановления из полной копии');
     log(`резервная копия: ${restored.restored} записей, ${restored.size} байт - восстановлено без потерь`);
 
-    // 7) Координаты всех домов по адресам OSM: справочник скачивается кнопкой, поиск в браузере
+    // 7) Координаты всех домов одной кнопкой: справочник OSM скачивается сам, остаток ищется через Яндекс
     if (GEOCODE_TEST) {
       const kept = new Set(matched.map((r) => r.ur));
-      const expectOk = exp.rows.filter((r) => osm.plan.get(r.ur) === 'ok' && !kept.has(r.ur)).length;
+      const expectOsm = exp.rows.filter((r) => osm.plan.get(r.ur) === 'ok' && !kept.has(r.ur)).length;
+      const ambiguousU = [...osm.plan].filter(([, v]) => v === 'ambiguous').map(([u]) => u);
       await page.click('.nav-item[data-view="import"]');
-      await page.click('#view-import button:has-text("Координаты всех домов")');
-      await page.click('.modal button:has-text("Скачать адреса Москвы")');
-      await page.waitForSelector('.modal :text("Адресов:")', { timeout: 60000 });
-      await page.click('.modal button:has-text("Найти координаты домов")');
-      await page.waitForSelector('.modal :text("Найдено по адресу")', { timeout: 60000 });
+      await page.click('#view-import button:has-text("Найти координаты всех домов")');
+      await page.waitForSelector('.modal :text("Яндекс Геокодер: указать ключ API")');
+      await page.click('.modal summary');
+      await page.fill('.modal input[aria-label="Ключ API Яндекс Геокодера"]', 'test-key-1234');
+      await page.click('.modal button:has-text("Сохранить")');
+      await page.waitForSelector('.modal :text("ключ …1234")');
+      await page.click('.modal button.btn-block:has-text("Найти координаты всех домов")');
+      await page.waitForSelector('.modal :text("С координатами")', { timeout: 90000 });
       await page.screenshot({ path: join(OUT, '10_geocode.png') });
-      const geoAfter = await page.evaluate(() => window.__app.state.geo.size);
-      assert.equal(geoAfter, 6 + expectOk, 'найдены все дома с однозначным адресом, ручные точки не тронуты');
-      const st6 = await page.evaluate((u) => [...window.__app.state.geo.values()].filter((g) => g.status === 'imported').length);
-      assert.equal(st6, 6, 'точки из файла не перезаписаны');
+      const geo = await page.evaluate(() => {
+        const by = {};
+        for (const g of window.__app.state.geo.values()) by[g.status] = (by[g.status] || 0) + 1;
+        return by;
+      });
+      assert.equal(geo.imported, 6, 'точки из файла не перезаписаны');
+      assert.equal(geo.osm, expectOsm, 'по адресам OSM найдены все однозначные адреса');
+      // Яндекс нашёл остальные, кроме адреса, для которого вернул только улицу
+      assert.equal(geo.yandex, k.mkd - 6 - expectOsm - ambiguousU.length, 'остальные найдены через Яндекс');
+      const total = 6 + geo.osm + geo.yandex;
       const csvLines = readFileSync(GEOCODED, 'utf8').trim().split(/\r?\n/);
-      assert.equal(csvLines.length, geoAfter + 1, 'копия координат сохранена в data/local/geocoded_houses.csv');
+      assert.equal(csvLines.length, total + 1, 'копия координат сохранена в data/local/geocoded_houses.csv');
+      assert.ok(!JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/yandex`)).json()).includes('test-key'), 'ключ не отдаётся наружу');
       await page.click('.modal button:has-text("Закрыть")');
       await page.click('.nav-item[data-view="map"]');
+      await page.evaluate(() => { window.__app.map.map.setView([55.75, 37.6], 10); });
       await page.waitForTimeout(800);
       await page.screenshot({ path: join(OUT, '11_map_geocoded.png') });
-      log(`координаты по адресам OSM: найдено ${expectOk}, с координатами ${geoAfter} из ${k.mkd}; копия в data/local/geocoded_houses.csv`);
+      log(`координаты одной кнопкой: OSM ${geo.osm}, Яндекс ${geo.yandex}, вручную 6; всего ${total} из ${k.mkd}`);
     } else {
       log('координаты по адресам: справочник или geocoded_houses.csv уже есть, проверка пропущена');
     }
@@ -380,8 +414,9 @@ function prepareSourceFolder() {
     server.kill();
     tileServer.close();
     overpass.close();
+    yandex.close();
     if (BASEMAP_TEST) for (const f of [BASEMAP, `${BASEMAP}.json`]) rmSync(f, { force: true });
-    if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED]) rmSync(f, { force: true });
+    if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED, YANDEX_CACHE]) rmSync(f, { force: true });
     rmSync(SRC_DIR, { recursive: true, force: true });
   }
 })().catch((e) => { console.error('E2E ОШИБКА:', e); process.exit(1); });

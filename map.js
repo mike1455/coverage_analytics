@@ -53,6 +53,7 @@ export class MapView {
   _create() {
     this.map = L.map(this.el, { zoomControl: false, preferCanvas: true, minZoom: 8, maxZoom: 19, attributionControl: true })
       .setView(MOSCOW, 10);
+    this.map.attributionControl.setPrefix(false); // без надписи Leaflet, остаются только источники данных
     L.control.zoom({ position: 'bottomright' }).addTo(this.map);
     L.control.scale({ imperial: false, position: 'bottomright' }).addTo(this.map);
     this.renderer = L.canvas({ padding: 0.3 });

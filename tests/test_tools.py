@@ -703,5 +703,157 @@ class AddressesApi(unittest.TestCase):
         self.assertEqual(st, 400)
 
 
+YG = load("yandex_geocoder_mod", ROOT / "tools" / "yandex_geocoder.py")
+
+
+def yandex_answer(query):
+    """Ответ в формате HTTP Геокодера Яндекса (format=json)."""
+    if "Неизвестная" in query:
+        members = []
+    else:
+        precision = "number" if "Щербинка" in query else "exact"
+        members = [{"GeoObject": {
+            "metaDataProperty": {"GeocoderMetaData": {"precision": precision, "kind": "house", "text": "Россия, " + query}},
+            "Point": {"pos": "37.593 55.889"}}}]
+    return {"response": {"GeoObjectCollection": {"metaDataProperty": {}, "featureMember": members}}}
+
+
+class FakeYandex:
+    def __init__(self):
+        self.calls = []
+        fake = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                fake.calls.append(q)
+                if q["apikey"][0] == "bad-key-0000":
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                data = json.dumps(yandex_answer(q["geocode"][0])).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+        self.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = "http://127.0.0.1:%d/1.x/" % self.srv.server_address[1]
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class YandexGeocoder(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.settings, self.cache = d / "geocoder.local.json", d / "cache.json"
+        self.fake = FakeYandex()
+        os.environ["MCA_YANDEX_URL"] = self.fake.url
+
+    def tearDown(self):
+        os.environ.pop("MCA_YANDEX_URL", None)
+        self.fake.close()
+        self.tmp.cleanup()
+
+    def run_items(self, items):
+        prog = BM.Progress()
+        YG.run(prog, items, settings_path=self.settings, cache_path=self.cache, rate=0)
+        return prog
+
+    def test_query_text(self):
+        self.assertEqual(YG.query_for("Лескова ул., д.5"), "Москва, Лескова ул., д.5")
+        self.assertEqual(YG.query_for("Чехова ул. (Щербинка г.), д.4"), "Москва, Щербинка г., Чехова ул., д.4")
+        self.assertEqual(YG.query_for("Российская Федерация, город Москва, внутригородская территория муниципальный округ Куркино, Юровская улица, дом 93, корпус 5"),
+                         "Москва, Юровская улица, дом 93, корпус 5")
+        self.assertEqual(YG.query_for("Зеленоград г. (Зеленоград г.), к.2315а"), "Москва, Зеленоград г., к.2315а")
+
+    def test_parse_response(self):
+        r = YG.parse_response(yandex_answer("Москва, Лескова ул., д.5"))
+        self.assertEqual((r["lat"], r["lon"], r["precision"], r["kind"]), (55.889, 37.593, "exact", "house"))
+        self.assertEqual(YG.parse_response(yandex_answer("Неизвестная")), {"none": True})
+
+    def test_settings_are_validated_and_masked(self):
+        with self.assertRaises(ValueError):
+            YG.save_settings({"apiKey": "ключ с пробелами"}, self.settings)
+        YG.save_settings({"apiKey": "abcd-1234-efgh-5678", "dailyLimit": 50}, self.settings)
+        st = YG.public_state(self.settings, self.cache)
+        self.assertEqual((st["hasKey"], st["keyTail"], st["dailyLimit"]), (True, "5678", 50))
+        self.assertNotIn("abcd-1234", json.dumps(st))
+
+    def test_cache_and_daily_limit(self):
+        YG.save_settings({"apiKey": "abcd-1234-efgh-5678", "dailyLimit": 2}, self.settings)
+        items = [{"id": "1", "address": "Лескова ул., д.5"}, {"id": "2", "address": "Чехова ул. (Щербинка г.), д.4"},
+                 {"id": "3", "address": "Неизвестная ул., д.1"}]
+        prog = self.run_items(items)
+        self.assertEqual(prog.snapshot()["state"], "done")
+        self.assertIn("суточный лимит", prog.snapshot()["message"])
+        self.assertEqual(sorted(prog.results), ["1", "2"])
+        self.assertEqual(prog.results["2"]["precision"], "number")
+        self.assertEqual(len(self.fake.calls), 2)
+        self.assertEqual(self.fake.calls[0]["bbox"][0], "36.80,55.13~37.97,56.03")
+        # повторный запуск: первые два из кэша, лимит на сегодня уже исчерпан
+        prog = self.run_items(items)
+        self.assertEqual(len(self.fake.calls), 2)
+        self.assertEqual(sorted(prog.results), ["1", "2"])
+        self.assertEqual(YG.public_state(self.settings, self.cache)["usedToday"], 2)
+
+    def test_bad_key_and_missing_key(self):
+        prog = self.run_items([{"id": "1", "address": "Лескова ул., д.5"}])
+        self.assertEqual(prog.snapshot()["state"], "error")
+        self.assertIn("ключ", prog.snapshot()["message"])
+        YG.save_settings({"apiKey": "bad-key-0000"}, self.settings)
+        prog = self.run_items([{"id": "1", "address": "Лескова ул., д.5"}])
+        self.assertEqual(prog.snapshot()["state"], "error")
+        self.assertIn("HTTP 403", prog.snapshot()["message"])
+
+
+class YandexApi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.fake = FakeYandex()
+        os.environ["MCA_YANDEX_URL"] = cls.fake.url
+        cls.serve = load("serve_yandex", ROOT / "serve.py")
+        cls.serve.YANDEX_SETTINGS = Path(cls.tmp.name) / "geocoder.local.json"
+        cls.serve.YANDEX_CACHE = Path(cls.tmp.name) / "cache.json"
+        cls.app = cls.serve.Server(("127.0.0.1", 0), cls.serve.Handler)
+        threading.Thread(target=cls.app.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("MCA_YANDEX_URL", None)
+        cls.app.shutdown()
+        cls.app.server_close()
+        cls.fake.close()
+        cls.tmp.cleanup()
+
+    api = AddressesApi.api
+
+    def test_settings_start_results(self):
+        st, body = self.api("/api/yandex")
+        self.assertEqual((st, body["hasKey"]), (200, False))
+        st, body = self.api("/api/yandex/settings", {"apiKey": "abcd-1234-efgh-5678"})
+        self.assertEqual((st, body["hasKey"], body["keyTail"]), (200, True, "5678"))
+        st, body = self.api("/api/yandex/start", {"items": [{"id": "u1", "address": "Лескова ул., д.5"}]})
+        self.assertEqual(st, 202, body)
+        for _ in range(200):
+            st, body = self.api("/api/yandex")
+            if body["job"]["state"] != "running":
+                break
+            threading.Event().wait(0.05)
+        self.assertEqual(body["job"]["state"], "done", body["job"])
+        st, body = self.api("/api/yandex/results")
+        self.assertEqual(body["results"]["u1"]["kind"], "house")
+        st, body = self.api("/api/yandex/start", {"items": "не список"})
+        self.assertEqual(st, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

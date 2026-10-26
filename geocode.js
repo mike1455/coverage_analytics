@@ -1,66 +1,59 @@
-// Координаты всех домов реестра МЖИ по адресам OpenStreetMap.
-// 1) serve.py один раз скачивает адреса зданий Москвы через Overpass API в data/local/osm/moscow_addresses.json;
-// 2) приложение сопоставляет с ними адреса МЖИ (core/addrmatch.js) и сохраняет точки в браузере
-//    и копией в data/local/geocoded_houses.csv. Точки, указанные или проверенные вручную, не меняются.
+// Координаты всех домов реестра МЖИ одной кнопкой.
+// 1) Адреса зданий Москвы из OpenStreetMap: serve.py скачивает их один раз через Overpass API
+//    в data/local/osm/moscow_addresses.json (если файла ещё нет);
+// 2) адреса МЖИ сопоставляются с ними в браузере (core/addrmatch.js);
+// 3) оставшиеся дома ищутся через Яндекс Геокодер, если на этом компьютере указан ключ API.
+// Точки сохраняются в браузере и копией в data/local/geocoded_houses.csv.
+// Точки, указанные вручную, проверенные или загруженные из файла, не меняются.
 
 import { h, clear, fmt, icon, toast, modal, download } from './ui.js';
 import { putMany } from './storage.js';
 import { buildIndex, matchAddress } from './core/addrmatch.js';
 import { toCsv } from './core/csv.js';
+import { inMoscow } from './geo.js';
 
-const API = 'api/addresses';
-let state = { api: false, exists: false, job: { state: 'idle' } };
-let timer = null;
-const listeners = new Set();
+const KEEP = new Set(['manual', 'verified', 'imported', 'auto', 'yandex']); // поиск по OSM эти точки не трогает
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export function onAddresses(fn) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
+async function getJson(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
 
-export function addressesState() {
-  return state;
-}
-
-export async function refreshAddresses() {
-  try {
-    const r = await fetch(API, { cache: 'no-store' });
-    if (!r.ok) throw new Error(String(r.status));
-    state = { api: true, ...(await r.json()) };
-  } catch (_) {
-    state = { api: false, exists: false, job: { state: 'idle' } };
-  }
-  const running = state.job && state.job.state === 'running';
-  if (running && !timer) timer = setInterval(refreshAddresses, 1500);
-  if (!running && timer) { clearInterval(timer); timer = null; }
-  for (const fn of [...listeners]) fn(state);
-  return state;
-}
-
-async function post(path, body = {}) {
-  const r = await fetch(`${API}/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+async function postJson(url, body = {}) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok && r.status !== 409) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
 }
 
-const KEEP = new Set(['manual', 'verified', 'imported', 'auto']); // эти точки поиск по OSM не трогает
+/** Ждать окончания фоновой задачи serve.py, сообщая её ход. */
+async function waitJob(url, onTick) {
+  for (;;) {
+    const st = await getJson(url);
+    onTick(st);
+    if (!st.job || st.job.state !== 'running') return st;
+    await sleep(1000);
+  }
+}
 
-/**
- * Найти координаты домов без геопозиции (и обновить найденные ранее по OSM).
- * @returns {Promise<{total, matched, kept, ambiguous, notfound, unparsed, missing: Array}>}
- */
-export async function geocodeAll(app, { onProgress = () => {} } = {}) {
+export const addressesState = () => getJson('api/addresses').then((s) => ({ api: true, ...s })).catch(() => ({ api: false }));
+export const yandexState = () => getJson('api/yandex').then((s) => ({ api: true, ...s })).catch(() => ({ api: false }));
+
+/** Шаг 2: сопоставить адреса МЖИ со справочником OSM. */
+export async function matchOsm(app, addr, onProgress = () => {}) {
   onProgress('Чтение справочника адресов', 0);
-  const res = await fetch(`${state.url || 'data/local/osm/moscow_addresses.json'}?v=${state.mtime || Date.now()}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error('Справочник адресов не найден. Сначала скачайте его.');
+  const res = await fetch(`${addr.url || 'data/local/osm/moscow_addresses.json'}?v=${addr.mtime || Date.now()}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('Справочник адресов OSM не найден');
   const doc = await res.json();
-  onProgress('Подготовка справочника', 5);
-  await new Promise((r) => setTimeout(r, 0));
+  onProgress('Подготовка справочника', 3);
+  await tick();
   const index = buildIndex(doc.rows || []);
   const rows = app.state.rows;
   const now = new Date().toISOString();
-  const stats = { total: rows.length, matched: 0, kept: 0, ambiguous: 0, notfound: 0, unparsed: 0, missing: [] };
+  const stats = { matched: 0, kept: 0, ambiguous: 0, notfound: 0, unparsed: 0 };
   const out = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -77,21 +70,33 @@ export async function geocodeAll(app, { onProgress = () => {} } = {}) {
       });
     } else {
       stats[m.status]++;
-      stats.missing.push({ r, why: { ambiguous: 'несколько зданий с таким адресом', notfound: 'адрес не найден в OSM', unparsed: 'адрес не разобран' }[m.status] });
     }
     if (i % 2000 === 0) {
-      onProgress(`Сопоставление адресов: ${fmt.int(i)} из ${fmt.int(rows.length)}`, 10 + (i / rows.length) * 70);
-      await new Promise((r2) => setTimeout(r2, 0));
+      onProgress(`${fmt.int(i)} из ${fmt.int(rows.length)}`, 5 + (i / rows.length) * 85);
+      await tick();
     }
   }
-  for (let i = 0; i < out.length; i += 2000) {
-    onProgress(`Сохранение: ${fmt.int(i)} из ${fmt.int(out.length)}`, 80 + (i / Math.max(1, out.length)) * 15);
-    await putMany('geo', out.slice(i, i + 2000));
-  }
+  for (let i = 0; i < out.length; i += 2000) await putMany('geo', out.slice(i, i + 2000));
   await app.reloadGeo();
-  onProgress('Копия в файл', 97);
-  stats.file = await saveGeocodedFile(app).catch(() => null);
   return stats;
+}
+
+/** Шаг 3: принять ответы Яндекс Геокодера. Берутся только дома (kind=house) в границах Москвы. */
+export function yandexRecords(app, results, now = new Date().toISOString()) {
+  const out = [];
+  const byU = new Map(app.state.rows.map((r) => [r.u, r]));
+  for (const [u, hit] of Object.entries(results || {})) {
+    const r = byU.get(u);
+    if (!r || !hit || hit.none || app.state.geo.has(u)) continue;
+    if (hit.kind !== 'house' || !['exact', 'number', 'near'].includes(hit.precision) || !inMoscow(hit.lat, hit.lon)) continue;
+    const exact = hit.precision === 'exact';
+    out.push({
+      u, ur: r.ur, lat: hit.lat, lon: hit.lon, building: null, source: `Яндекс Геокодер: ${hit.text || ''}`,
+      accuracy: exact ? 'Яндекс, адрес совпал' : hit.precision === 'number' ? 'Яндекс, совпал номер дома без корпуса' : 'Яндекс, ближайший дом',
+      status: 'yandex', verified_at: '', address_at_geocode: r.address, review: exact ? '' : 'адрес совпал не полностью', updated_at: now,
+    });
+  }
+  return out;
 }
 
 /** Все точки домов → data/local/geocoded_houses.csv (через serve.py). */
@@ -99,85 +104,169 @@ export async function saveGeocodedFile(app) {
   const byU = new Map(app.state.rows.map((r) => [r.u, r]));
   const rows = [...app.state.geo.values()].map((g) => [g.ur || g.u, g.lat, g.lon, g.source || '', g.accuracy || '', g.status || '', byU.get(g.u)?.address || g.address_at_geocode || '']);
   const csv = toCsv(['unom', 'lat', 'lon', 'source', 'accuracy', 'status', 'address'], rows).replace(/^﻿/, '');
-  const r = await fetch('api/geocoded', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csv }) });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return (await r.json()).saved;
+  return (await postJson('api/geocoded', { csv })).saved;
 }
 
-function missingCsv(list) {
-  return toCsv(['unom', 'округ', 'район', 'адрес МЖИ', 'причина'], list.map(({ r, why }) => [r.ur, r.okrug, r.area, r.address, why]));
+function missingCsv(app) {
+  const list = app.state.rows.filter((r) => !app.state.geo.has(r.u));
+  return toCsv(['unom', 'округ', 'район', 'адрес МЖИ'], list.map((r) => [r.ur, r.okrug, r.area, r.address]));
 }
 
-/** Окно «Координаты домов по адресам». */
-export function openGeocodeDialog(app) {
-  const body = h('div', { class: 'stack', style: { gap: '12px' } });
-  const dlg = modal({ title: 'Координаты домов по адресам', body, wide: false, actions: [{ label: 'Закрыть' }] });
-  let result = null;
-  let busy = null;
-  const draw = () => {
+/**
+ * Окно «Координаты домов»: одна кнопка запускает все шаги по очереди.
+ * opts.autostart - начать сразу после открытия.
+ */
+export function openGeocodeDialog(app, { autostart = false } = {}) {
+  const body = h('div', { class: 'stack geo-run', style: { gap: '14px' } });
+  const dlg = modal({ title: 'Координаты домов', body, actions: [{ label: 'Закрыть' }] });
+  const st = {
+    addr: { api: false }, ya: { api: false }, running: false, error: '',
+    steps: { osm: { state: 'wait', text: '' }, match: { state: 'wait', text: '' }, ya: { state: 'wait', text: '' } },
+    result: null, keyOpen: false,
+  };
+  const setStep = (k, state, text) => { st.steps[k] = { state, text }; draw(); };
+
+  async function run() {
+    if (st.running) return;
+    st.running = true;
+    st.error = '';
+    st.result = null;
+    const before = app.state.geo.size;
+    for (const k of Object.keys(st.steps)) st.steps[k] = { state: 'wait', text: '' };
+    draw();
+    try {
+      // 1. Справочник адресов OSM: скачать, если его ещё нет
+      st.addr = await addressesState();
+      if (!st.addr.api) throw new Error('Поиск координат работает, когда приложение запущено через start.bat (py -3 serve.py).');
+      let m = { matched: 0 };
+      try {
+        if (!st.addr.exists) {
+          setStep('osm', 'run', 'Скачивание адресов зданий Москвы');
+          await postJson('api/addresses/download');
+          st.addr = await waitJob('api/addresses', (s) => {
+            const j = s.job || {};
+            setStep('osm', 'run', `${j.stage || 'Скачивание'}${j.total ? ` (${Math.round((j.done / j.total) * 100)}%)` : ''}`);
+          });
+          if (!st.addr.exists) throw new Error(st.addr.job.message || 'Справочник адресов не скачан');
+        }
+        setStep('osm', 'ok', `${fmt.int(st.addr.count)} адресов, скачаны ${fmt.date(st.addr.downloadedAt)}`);
+        // 2. Сопоставление в браузере
+        setStep('match', 'run', 'Сопоставление адресов');
+        m = await matchOsm(app, st.addr, (text) => setStep('match', 'run', `Сопоставление адресов: ${text}`));
+        setStep('match', 'ok', `найдено по адресу OSM: ${fmt.int(m.matched)}`);
+      } catch (e) {
+        // OpenStreetMap недоступен: оставшиеся дома всё равно можно найти через Яндекс
+        if (st.steps.osm.state !== 'ok') setStep('osm', 'fail', e.message);
+        setStep('match', st.steps.osm.state === 'ok' ? 'fail' : 'skip', st.steps.osm.state === 'ok' ? e.message : 'пропущено');
+      }
+      // 3. Яндекс для оставшихся
+      st.ya = await yandexState();
+      const rest = app.state.rows.filter((r) => !app.state.geo.has(r.u));
+      let yaFound = 0;
+      if (!rest.length) {
+        setStep('ya', 'skip', 'не понадобился: все дома найдены');
+      } else if (!st.ya.hasKey) {
+        setStep('ya', 'skip', 'ключ API не указан, шаг пропущен');
+      } else {
+        setStep('ya', 'run', `Поиск ${fmt.int(rest.length)} оставшихся домов`);
+        await postJson('api/yandex/start', { items: rest.map((r) => ({ id: r.u, address: r.address })) });
+        st.ya = await waitJob('api/yandex', (s) => {
+          const j = s.job || {};
+          setStep('ya', 'run', `${fmt.int(j.done || 0)} из ${fmt.int(j.total || rest.length)}`);
+        });
+        const { results } = await getJson('api/yandex/results');
+        const recs = yandexRecords(app, results);
+        await putMany('geo', recs);
+        await app.reloadGeo();
+        yaFound = recs.length;
+        const j = st.ya.job || {};
+        if (j.state === 'error') setStep('ya', 'warn', `найдено ${fmt.int(yaFound)}; ${j.message}`);
+        else setStep('ya', yaFound ? 'ok' : 'warn', `найдено через Яндекс: ${fmt.int(yaFound)}${j.message ? `. ${j.message}` : ''}`);
+      }
+      st.result = { before, after: app.state.geo.size, osm: m.matched, ya: yaFound, file: await saveGeocodedFile(app).catch(() => '') };
+      toast(`Координаты: ${fmt.int(app.state.geo.size)} домов из ${fmt.int(app.state.rows.length)}`, 'ok');
+    } catch (e) {
+      st.error = e.message;
+      for (const k of Object.keys(st.steps)) if (st.steps[k].state === 'run') st.steps[k].state = 'fail';
+    }
+    st.running = false;
+    draw();
+  }
+
+  async function saveKey(apiKey, dailyLimit) {
+    try {
+      st.ya = { api: true, ...(await postJson('api/yandex/settings', { apiKey, dailyLimit })) };
+      toast(st.ya.hasKey ? 'Ключ сохранён на этом компьютере' : 'Ключ удалён', 'ok');
+    } catch (e) {
+      toast(e.message, 'error', 7000);
+    }
+    draw();
+  }
+
+  const STEP_ICON = { ok: 'checkCircle', run: 'refresh', fail: 'xCircle', warn: 'warn', skip: 'slash', wait: 'help' };
+  function stepRow(k, title) {
+    const s = st.steps[k];
+    return h('li', { class: `run-step ${s.state}` }, h('span', { class: 'ic' }, icon(STEP_ICON[s.state] || 'help', 16)),
+      h('div', null, h('b', null, title), s.text ? h('div', { class: 'small ink2' }, s.text) : null));
+  }
+
+  function draw() {
+    if (!body.isConnected) return; // окно уже закрыто
     clear(body);
-    const s = state;
-    const job = s.job || {};
-    body.append(h('p', { class: 'ink2', style: { margin: 0 } },
-      'Координаты домов ищутся по адресам зданий из OpenStreetMap. Справочник адресов Москвы скачивается один раз (несколько минут), дальше поиск идёт на этом компьютере без интернета. Найденные точки сохраняются в браузере и копией в файл data/local/geocoded_houses.csv.'));
-    // Шаг 1: справочник
-    const step1 = h('div', { class: 'card stack', style: { gap: '8px', padding: '12px 14px' } }, h('b', null, '1. Справочник адресов OSM'));
-    if (!s.api) {
-      step1.append(h('div', { class: 'small ink2' }, 'Скачать справочник можно, когда приложение запущено через start.bat (py -3 serve.py).'));
-    } else if (job.state === 'running') {
-      step1.append(h('div', { class: 'small' }, job.stage || 'Загрузка'),
-        h('div', { class: `progress ${job.total ? '' : 'indeterminate'}` }, h('i', { style: { width: job.total ? `${(job.done / job.total) * 100}%` : '30%' } })),
-        h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-sm btn-ghost', onclick: () => post('cancel').then(refreshAddresses) }, 'Отменить')));
-    } else {
-      step1.append(s.exists
-        ? h('div', { class: 'basemap-ok' }, icon('checkCircle', 16), h('div', null, h('div', null, `Адресов: ${fmt.int(s.count)}`), h('div', { class: 'small ink2' }, `скачан ${fmt.dateTime(s.downloadedAt)}, ${fmt.bytes(s.size)}`)))
-        : h('div', { class: 'small ink2' }, 'Справочник ещё не скачан.'),
-      h('div', { class: 'actions-row' }, h('button', {
-        class: `btn btn-sm ${s.exists ? '' : 'btn-primary'}`,
-        onclick: async () => { try { await post('download'); } catch (e) { toast(`Не удалось начать загрузку: ${e.message}`, 'error', 7000); } refreshAddresses(); },
-      }, icon(s.exists ? 'refresh' : 'download', 14), s.exists ? 'Обновить справочник' : 'Скачать адреса Москвы')));
-      if (job.state === 'error') step1.append(h('div', { class: 'note warn small' }, icon('warn'), h('div', null, job.message)));
-      if (job.state === 'cancelled') step1.append(h('div', { class: 'small muted' }, job.message));
+    const rows = app.state.rows;
+    if (!rows.length) {
+      body.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'Сначала загрузите реестр МЖИ: координаты ищутся для его домов.')),
+        h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-primary', onclick: () => { dlg.close(); app.openSources(); } }, icon('database', 16), 'Загрузить из папки выгрузок')));
+      return;
     }
-    body.append(step1);
-    // Шаг 2: поиск
-    const noGeo = app.state.rows.filter((r) => !app.state.geo.has(r.u)).length;
-    const step2 = h('div', { class: 'card stack', style: { gap: '8px', padding: '12px 14px' } }, h('b', null, '2. Поиск координат'),
-      h('div', { class: 'small ink2' }, `Домов в реестре: ${fmt.int(app.state.rows.length)}, без координат: ${fmt.int(noGeo)}. Точки, указанные или проверенные вручную, не изменятся.`));
-    if (busy) {
-      step2.append(h('div', { class: 'small' }, busy.text), h('div', { class: 'progress' }, h('i', { style: { width: `${busy.pct}%` } })));
-    } else {
-      step2.append(h('div', { class: 'actions-row' }, h('button', {
-        class: 'btn btn-sm btn-primary', disabled: !s.exists || job.state === 'running' || !app.state.rows.length,
-        onclick: async () => {
-          busy = { text: 'Подготовка', pct: 0 };
-          draw();
-          try {
-            result = await geocodeAll(app, { onProgress: (text, pct) => { busy = { text, pct }; draw(); } });
-            toast(`Найдены координаты ${fmt.int(result.matched)} домов`, 'ok');
-          } catch (e) {
-            toast(e.message, 'error', 7000);
-          }
-          busy = null;
-          draw();
-        },
-      }, icon('search', 14), 'Найти координаты домов')));
-    }
-    if (result) {
-      const pct = result.total ? (app.state.geo.size / result.total) : 0;
-      step2.append(h('div', { class: 'note ok small' }, icon('checkCircle'), h('div', null,
-        h('div', null, h('b', null, `Найдено по адресу: ${fmt.int(result.matched)}`), `. Всего с координатами ${fmt.int(app.state.geo.size)} из ${fmt.int(result.total)} (${fmt.pct(pct)}).`),
-        h('div', null, `Не найдено: ${fmt.int(result.notfound)}, неоднозначно: ${fmt.int(result.ambiguous)}, не разобрано: ${fmt.int(result.unparsed)}, оставлено как было: ${fmt.int(result.kept)}.`),
-        result.file ? h('div', { class: 'muted' }, `Копия сохранена: ${result.file}`) : null)));
-      if (result.missing.length) {
-        step2.append(h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-sm', onclick: () => download(new Blob([missingCsv(result.missing)], { type: 'text/csv;charset=utf-8' }), 'дома_без_координат.csv') }, icon('download', 14), 'Список ненайденных (CSV)')),
-          h('div', { class: 'small muted' }, 'Ненайденные дома можно привязать в карточке дома: поиск OSM по одному адресу или точка на карте.'));
+    const noGeo = rows.filter((r) => !app.state.geo.has(r.u)).length;
+    body.append(
+      h('p', { class: 'ink2', style: { margin: 0 } }, `В реестре ${fmt.int(rows.length)} домов, без координат ${fmt.int(noGeo)}. Кнопка ниже по очереди выполнит все шаги. Точки, поставленные или проверенные вручную, не изменятся.`),
+      h('ol', { class: 'run-steps' },
+        stepRow('osm', 'Адреса зданий Москвы из OpenStreetMap'),
+        stepRow('match', 'Сопоставление с адресами реестра'),
+        stepRow('ya', 'Яндекс Геокодер для оставшихся домов')),
+      h('button', { class: 'btn btn-primary btn-block', disabled: st.running, onclick: run }, icon(st.running ? 'refresh' : 'pin', 16),
+        st.running ? 'Идёт поиск координат...' : st.result ? 'Найти ещё раз' : 'Найти координаты всех домов'));
+    if (st.error) body.append(h('div', { class: 'note error small' }, icon('warn'), h('div', null, st.error)));
+    if (st.result) {
+      const r = st.result;
+      body.append(h('div', { class: 'note ok' }, icon('checkCircle'), h('div', null,
+        h('div', null, h('b', null, `С координатами ${fmt.int(r.after)} из ${fmt.int(rows.length)} домов (${fmt.pct(r.after / rows.length)})`)),
+        h('div', { class: 'small' }, `OpenStreetMap: ${fmt.int(r.osm)}, Яндекс: ${fmt.int(r.ya)}. Без координат: ${fmt.int(rows.length - r.after)}.`),
+        r.file ? h('div', { class: 'small muted wrap' }, `Копия: ${r.file}`) : null)));
+      if (rows.length > r.after) {
+        body.append(h('div', { class: 'actions-row' },
+          h('button', { class: 'btn btn-sm', onclick: () => download(new Blob([missingCsv(app)], { type: 'text/csv;charset=utf-8' }), 'дома_без_координат.csv') }, icon('download', 14), 'Список домов без координат (CSV)'),
+          h('button', { class: 'btn btn-sm btn-ghost', onclick: () => { dlg.close(); app.go('houses'); } }, 'Открыть в таблице')));
       }
     }
-    body.append(step2, h('div', { class: 'small muted' }, 'Данные © участники OpenStreetMap (ODbL). Отправляется только запрос на адреса всей Москвы, данные МЖИ и ЕДЦ никуда не передаются.'));
-  };
-  const off = onAddresses(() => { if (!body.isConnected) { off(); return; } if (!busy) draw(); });
+    // Настройки Яндекса
+    const ya = st.ya;
+    const keyIn = h('input', { type: 'password', placeholder: ya.hasKey ? `сохранён, …${ya.keyTail}` : 'ключ API', autocomplete: 'off', style: { width: '100%' }, 'aria-label': 'Ключ API Яндекс Геокодера' });
+    const limIn = h('input', { type: 'number', min: 1, value: ya.dailyLimit || 1000, style: { width: '120px' }, 'aria-label': 'Суточный лимит запросов' });
+    body.append(h('details', { class: 'ya-settings', open: st.keyOpen, ontoggle: (e) => { st.keyOpen = e.target.open; } },
+      h('summary', null, ya.hasKey ? `Яндекс Геокодер: ключ …${ya.keyTail}, лимит ${fmt.int(ya.dailyLimit)} в сутки, сегодня ${fmt.int(ya.usedToday)}` : 'Яндекс Геокодер: указать ключ API'),
+      h('div', { class: 'stack', style: { gap: '8px', marginTop: '10px' } },
+        h('div', { class: 'small ink2' }, 'Ключ выдаётся в кабинете разработчика Яндекса (developer.tech.yandex.ru), сервис «JavaScript API и HTTP Геокодер». Ключ хранится только на этом компьютере (config/geocoder.local.json). В Яндекс отправляются только адреса домов без координат; ответы сохраняются в data/local, повторный поиск лимит не тратит. Условия хранения результатов проверьте для своего тарифа.'),
+        h('div', { class: 'field-inline' }, h('label', null, 'Ключ API'), keyIn),
+        h('div', { class: 'field-inline' }, h('label', null, 'Лимит запросов в сутки'), limIn),
+        h('div', { class: 'actions-row' },
+          h('button', { class: 'btn btn-sm', onclick: () => saveKey(keyIn.value.trim() || undefined, Number(limIn.value)) }, 'Сохранить'),
+          ya.hasKey ? h('button', { class: 'btn btn-sm btn-ghost', onclick: () => saveKey('', Number(limIn.value)) }, 'Удалить ключ') : null))));
+  }
+
   draw();
-  refreshAddresses();
+  Promise.all([addressesState(), yandexState()]).then(([a, y]) => {
+    st.addr = a;
+    st.ya = y;
+    if (!st.running) {
+      if (a.exists) st.steps.osm = { state: 'ok', text: `${fmt.int(a.count)} адресов, скачаны ${fmt.date(a.downloadedAt)}` };
+      else if (a.api) st.steps.osm = { state: 'wait', text: 'будут скачаны один раз, несколько минут' };
+      if (y.api) st.steps.ya = { state: 'wait', text: y.hasKey ? 'для домов, которых нет в OSM' : 'нужен ключ API (настройка ниже), без него шаг пропускается' };
+      draw();
+    }
+    if (autostart) run();
+  });
   return dlg;
 }

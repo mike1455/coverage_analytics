@@ -5,6 +5,7 @@ data/input/*
 !data/input/README.md
 *.pmtiles
 config/sources.local.json
+config/geocoder.local.json
 config/*.tmp
 
 # Служебное

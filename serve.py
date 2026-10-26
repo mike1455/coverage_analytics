@@ -7,6 +7,7 @@
   * скачивает и обновляет офлайн-карту Москвы по кнопке в приложении (tools/basemap.py);
   * скачивает адреса зданий Москвы из OpenStreetMap для поиска координат домов (tools/osm_addresses.py)
     и сохраняет найденные координаты в data/local/geocoded_houses.csv;
+  * ищет оставшиеся дома через Яндекс Геокодер, если указан ключ API (tools/yandex_geocoder.py);
   * слушает только 127.0.0.1 (данные не видны в локальной сети);
   * правильные MIME-типы для .js/.mjs/.pmtiles/.geojson и отключённый кэш для файлов приложения;
   * локальный API «Папка с выгрузками»: приложение читает ваши файлы прямо с диска по путям из
@@ -33,6 +34,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
 import basemap  # noqa: E402
 import osm_addresses  # noqa: E402
+import yandex_geocoder  # noqa: E402
 
 DEFAULT_CONFIG = ROOT / "config" / "sources.default.json"
 LOCAL_CONFIG = Path(os.environ.get("MCA_SOURCES_CONFIG") or (ROOT / "config" / "sources.local.json"))
@@ -50,6 +52,8 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 BASEMAP_FILE = Path(os.environ.get("MCA_BASEMAP_FILE") or basemap.OUTPUT)
 ADDRESSES_FILE = osm_addresses.OUTPUT
 GEOCODED_FILE = ROOT / "data" / "local" / "geocoded_houses.csv"
+YANDEX_SETTINGS = Path(os.environ.get("MCA_GEOCODER_CONFIG") or yandex_geocoder.SETTINGS)
+YANDEX_CACHE = yandex_geocoder.CACHE
 
 
 # ---------------------------------------------------------------- настройки источников
@@ -264,6 +268,37 @@ def save_geocoded(data):
     return {"saved": str(GEOCODED_FILE), "size": GEOCODED_FILE.stat().st_size}
 
 
+YA_JOB = basemap.Progress()
+YA_JOB.results = {}
+_ya_thread = None
+
+
+def yandex_state():
+    st = yandex_geocoder.public_state(YANDEX_SETTINGS, YANDEX_CACHE)
+    st["job"] = YA_JOB.snapshot()
+    return st
+
+
+def start_yandex(data):
+    global _ya_thread
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
+        raise ValueError("Ожидается список адресов items")
+    items = [{"id": str(x.get("id", ""))[:100], "address": str(x.get("address", ""))[:500]} for x in items[:200000]]
+    with _basemap_lock:
+        if _ya_thread and _ya_thread.is_alive():
+            return False
+        YA_JOB.reset()
+        YA_JOB.results = {}
+        YA_JOB.set(state="running", stage="Подготовка", total=len(items))
+        kwargs = {"settings_path": YANDEX_SETTINGS, "cache_path": YANDEX_CACHE}
+        if os.environ.get("MCA_YANDEX_URL"):
+            kwargs["rate"] = 0
+        _ya_thread = threading.Thread(target=yandex_geocoder.run, args=(YA_JOB, items), kwargs=kwargs, daemon=True)
+        _ya_thread.start()
+    return True
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -326,7 +361,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(403, {"error": "Доступ только с localhost"})
         route = urllib.parse.urlsplit(self.path).path
         if route not in ("/api/sources", "/api/open-folder", "/api/basemap/download", "/api/basemap/cancel",
-                         "/api/addresses/download", "/api/addresses/cancel", "/api/geocoded"):
+                         "/api/addresses/download", "/api/addresses/cancel", "/api/geocoded",
+                         "/api/yandex/settings", "/api/yandex/start", "/api/yandex/cancel"):
             return self._json(404, {"error": "Нет такого метода"})
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json(415, {"error": "Нужен Content-Type: application/json"})
@@ -334,11 +370,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._open_folder()
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length > (64 * 1024 * 1024 if route == "/api/geocoded" else 65536):
+            if length > (64 * 1024 * 1024 if route in ("/api/geocoded", "/api/yandex/start") else 65536):
                 return self._json(413, {"error": "Слишком большой запрос"})
             data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if route == "/api/geocoded":
                 return self._json(200, save_geocoded(data))
+            if route == "/api/yandex/settings":
+                yandex_geocoder.save_settings(data if isinstance(data, dict) else {}, YANDEX_SETTINGS)
+                return self._json(200, yandex_state())
+            if route == "/api/yandex/cancel":
+                YA_JOB.cancel.set()
+                return self._json(200, yandex_state())
+            if route == "/api/yandex/start":
+                if not start_yandex(data):
+                    return self._json(409, {"error": "Поиск через Яндекс уже идёт", **yandex_state()})
+                return self._json(202, yandex_state())
             if route == "/api/addresses/cancel":
                 ADDR_JOB.cancel.set()
                 return self._json(200, addresses_state())
@@ -389,6 +435,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(200, basemap_state())
         if path == "/api/addresses":
             return self._json(200, addresses_state())
+        if path == "/api/yandex":
+            return self._json(200, yandex_state())
+        if path == "/api/yandex/results":
+            return self._json(200, {"results": dict(getattr(YA_JOB, "results", {}) or {})})
         m = re.fullmatch(r"/api/source/([a-z]+)", path)
         if not m:
             return self._json(404, {"error": "Нет такого метода"})
