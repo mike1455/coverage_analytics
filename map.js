@@ -112,6 +112,11 @@ export class MapView {
         url: `${PMTILES_URL}?v=${encodeURIComponent(this.pmtiles.version || '')}`, flavor: this.isDark ? 'dark' : 'light', lang: 'ru',
         attribution: '© участники <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, <a href="https://protomaps.com">Protomaps</a>',
       });
+      // Если файл карты повреждён или не читается, сказать об этом, а не показывать пустой фон
+      this.pmErrors = 0;
+      this.pmLoaded = 0;
+      this.base.on('tileload', () => { this.pmLoaded++; });
+      this.base.on('tileerror', () => { this.pmErrors++; if (this.pmErrors === 6 && !this.pmLoaded) this._renderControls(); });
     } else if (def && def.url) {
       const url = def.url.replace('{style}', this.isDark ? 'dark_all' : 'light_all');
       this.base = L.tileLayer(url, { subdomains: def.sub || 'abc', maxZoom: 19, maxNativeZoom: def.max, attribution: def.attr, crossOrigin: true });
@@ -189,6 +194,11 @@ export class MapView {
     const c = COLORS();
     let n = 0;
     this.counts = { full: 0, partial: 0, none: 0, na: 0, excluded: 0 };
+    // Когда домов на карте тысячи, точки мельче, чтобы город не превращался в сплошное пятно
+    let nGeo = 0;
+    for (const r of rows) if (geo.has(r.u)) nGeo++;
+    const radius = nGeo > 5000 ? 3.5 : nGeo > 1000 ? 5 : 6.5;
+    const weight = nGeo > 5000 ? 0.8 : 2;
     for (const r of rows) {
       const g = geo.get(r.u);
       if (!g) continue;
@@ -206,7 +216,7 @@ export class MapView {
       }
       if (this.layerOn.houses) {
         L.circleMarker([g.lat, g.lon], {
-          renderer: this.renderer, radius: 6.5, weight: 2, color: c.surface, fillColor: color, fillOpacity: 1,
+          renderer: this.renderer, radius, weight, color: c.surface, fillColor: color, fillOpacity: 1,
           dashArray: cov === COV.excluded ? '2 2' : null,
         }).on('click', () => this.cb.onHouse(r.u))
           .bindTooltip(() => h('div', null, h('b', null, r.address), h('div', null, STATUS[cov].label),
@@ -295,6 +305,8 @@ export class MapView {
         }, id === 'pmtiles' && !pm.available ? `${b.label} (не скачана)` : id === 'pmtiles' && !pm.rangeOk ? `${b.label} (нужен serve.py)` : b.label))),
       this.tileErrors && this.activeBasemap !== 'pmtiles' && this.activeBasemap !== 'none'
         ? h('div', { class: 'muted small', style: { marginTop: '6px' } }, 'Онлайн-подложка не загружается: нет доступа в интернет.') : null,
+      this.activeBasemap === 'pmtiles' && this.pmErrors >= 6 && !this.pmLoaded
+        ? h('div', { class: 'small', style: { marginTop: '6px', color: 'var(--danger-ink)' } }, 'Офлайн-карта не читается. Обновите её (раздел «Импорт и качество данных») или выберите онлайн-подложку.') : null,
       offlineHint);
     this.controls.append(base);
     if (this.mode !== 'heat') {

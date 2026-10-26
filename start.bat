@@ -1,8 +1,8 @@
 @echo off
-rem Moscow Coverage Analytics: start the local server and open http://localhost:8000
+rem Coverage analytics app: start the local server and open http://localhost:8000
 chcp 65001 >nul
 cd /d "%~dp0"
-where py >/dev/null 2>nul
+where py >nul 2>nul
 if %errorlevel%==0 (
   py -3 serve.py %*
 ) else (

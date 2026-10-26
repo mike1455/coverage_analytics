@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { ROOT, FIX, readCsv, mergeRaw } from '../helpers.mjs';
 import { parseMji } from '../../core/mji.js';
 import { Joiner, kpiOf } from '../../analytics.js';
+import { parseAddress, streetBag } from '../../core/addrmatch.js';
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -54,6 +55,43 @@ function rangeServer(file) {
       const a = Number(m[1]); const b = Math.min(Number(m[2]), buf.length - 1);
       resp.writeHead(206, { 'Content-Range': `bytes ${a}-${b}/${buf.length}`, 'Content-Length': b - a + 1 });
       resp.end(buf.subarray(a, b + 1));
+    });
+    srv.listen(0, '127.0.0.1', () => res(srv));
+  });
+}
+
+// Адреса OSM: локальный «Overpass» с адресами синтетических домов в записи, как в OSM
+// (другой порядок слов, «Ё», заглавные буквы в номере). Часть домов пропущена, один адрес неоднозначен.
+const ADDRESSES = join(ROOT, 'data', 'local', 'osm', 'moscow_addresses.json');
+const GEOCODED = join(ROOT, 'data', 'local', 'geocoded_houses.csv');
+const GEOCODE_TEST = !existsSync(ADDRESSES) && !existsSync(GEOCODED);
+function overpassElements() {
+  const m = readCsv(join(FIX, 'mji_synthetic.csv'));
+  const iA = m.header.indexOf('Наименование/адрес');
+  const iU = m.header.indexOf('UNOM');
+  const els = [];
+  const plan = new Map();
+  m.rows.forEach((r, i) => {
+    const p = parseAddress(r[iA]);
+    if (i % 7 === 3) { plan.set(r[iU], 'notfound'); return; }
+    const street = p.street.split(' ').reverse().join(' ').replace(/е/g, (ch, k) => (k === 1 ? 'ё' : ch));
+    const hn = p.keys[0].toUpperCase().replace('К', 'к').replace('С', 'с');
+    const lat = 55.55 + (i % 40) * 0.008;
+    const lon = 37.35 + Math.floor(i / 40) * 0.05;
+    els.push({ type: 'way', id: 1000 + i, center: { lat, lon }, tags: { building: 'yes', 'addr:street': street, 'addr:housenumber': hn } });
+    if (i === 10) {
+      els.push({ type: 'way', id: 9000, center: { lat: lat + 0.2, lon }, tags: { building: 'yes', 'addr:street': street, 'addr:housenumber': hn } });
+      plan.set(r[iU], 'ambiguous');
+    } else plan.set(r[iU], streetBag(p.street) && p.keys.length ? 'ok' : 'unparsed');
+  });
+  return { els, plan };
+}
+function overpassServer(elements) {
+  const body = JSON.stringify({ version: 0.6, elements });
+  return new Promise((res) => {
+    const srv = http.createServer((req, resp) => {
+      req.resume();
+      req.on('end', () => { resp.writeHead(200, { 'Content-Type': 'application/json' }); resp.end(body); });
     });
     srv.listen(0, '127.0.0.1', () => res(srv));
   });
@@ -132,8 +170,13 @@ function prepareSourceFolder() {
   const planet = join(SRC_DIR, 'planet.pmtiles');
   basemapSamples = JSON.parse(execFileSync(PY, [...PY_ARGS, '-c', 'import sys, test_tools as t; t.write_e2e_source(sys.argv[1])', planet], { cwd: join(ROOT, 'tests') }).toString());
   const tileServer = await rangeServer(planet);
+  const osm = overpassElements();
+  const overpass = await overpassServer(osm.els);
   const port = await freePort();
-  const server = await startServer(port, { MCA_BASEMAP_SOURCE: `http://127.0.0.1:${tileServer.address().port}/planet.pmtiles` });
+  const server = await startServer(port, {
+    MCA_BASEMAP_SOURCE: `http://127.0.0.1:${tileServer.address().port}/planet.pmtiles`,
+    MCA_OVERPASS_URL: `http://127.0.0.1:${overpass.address().port}/api/interpreter`,
+  });
   const browser = await chromium.launch();
   const errors = [];
   try {
@@ -296,6 +339,32 @@ function prepareSourceFolder() {
     assert.deepEqual(await uiKpi(page), k, 'KPI после восстановления из полной копии');
     log(`резервная копия: ${restored.restored} записей, ${restored.size} байт - восстановлено без потерь`);
 
+    // 7) Координаты всех домов по адресам OSM: справочник скачивается кнопкой, поиск в браузере
+    if (GEOCODE_TEST) {
+      const kept = new Set(matched.map((r) => r.ur));
+      const expectOk = exp.rows.filter((r) => osm.plan.get(r.ur) === 'ok' && !kept.has(r.ur)).length;
+      await page.click('.nav-item[data-view="import"]');
+      await page.click('#view-import button:has-text("Координаты всех домов")');
+      await page.click('.modal button:has-text("Скачать адреса Москвы")');
+      await page.waitForSelector('.modal :text("Адресов:")', { timeout: 60000 });
+      await page.click('.modal button:has-text("Найти координаты домов")');
+      await page.waitForSelector('.modal :text("Найдено по адресу")', { timeout: 60000 });
+      await page.screenshot({ path: join(OUT, '10_geocode.png') });
+      const geoAfter = await page.evaluate(() => window.__app.state.geo.size);
+      assert.equal(geoAfter, 6 + expectOk, 'найдены все дома с однозначным адресом, ручные точки не тронуты');
+      const st6 = await page.evaluate((u) => [...window.__app.state.geo.values()].filter((g) => g.status === 'imported').length);
+      assert.equal(st6, 6, 'точки из файла не перезаписаны');
+      const csvLines = readFileSync(GEOCODED, 'utf8').trim().split(/\r?\n/);
+      assert.equal(csvLines.length, geoAfter + 1, 'копия координат сохранена в data/local/geocoded_houses.csv');
+      await page.click('.modal button:has-text("Закрыть")');
+      await page.click('.nav-item[data-view="map"]');
+      await page.waitForTimeout(800);
+      await page.screenshot({ path: join(OUT, '11_map_geocoded.png') });
+      log(`координаты по адресам OSM: найдено ${expectOk}, с координатами ${geoAfter} из ${k.mkd}; копия в data/local/geocoded_houses.csv`);
+    } else {
+      log('координаты по адресам: справочник или geocoded_houses.csv уже есть, проверка пропущена');
+    }
+
     assert.deepEqual(errors, [], `ошибки в консоли: ${errors.join(' | ')}`);
     log('E2E: все проверки пройдены. Скриншоты:', OUT);
   } catch (e) {
@@ -310,7 +379,9 @@ function prepareSourceFolder() {
     await browser.close();
     server.kill();
     tileServer.close();
+    overpass.close();
     if (BASEMAP_TEST) for (const f of [BASEMAP, `${BASEMAP}.json`]) rmSync(f, { force: true });
+    if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED]) rmSync(f, { force: true });
     rmSync(SRC_DIR, { recursive: true, force: true });
   }
 })().catch((e) => { console.error('E2E ОШИБКА:', e); process.exit(1); });

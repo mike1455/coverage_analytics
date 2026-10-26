@@ -32,7 +32,7 @@ BUILDS = "https://build.protomaps.com/{date}.pmtiles"
 MOSCOW_BBOX = (36.80, 55.13, 37.97, 56.03)
 DEFAULT_MAXZOOM = 15
 OUTPUT = ROOT / "data" / "local" / "moscow.pmtiles"
-USER_AGENT = "MoscowCoverageAnalytics/1.0 (local basemap extract)"
+USER_AGENT = "coverage-analytics/1.0 (local basemap extract)"
 
 HEADER_LEN = 127
 ROOT_LIMIT = 16384  # заголовок + корневой каталог по спецификации укладываются в первые 16 КБ

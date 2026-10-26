@@ -532,5 +532,176 @@ class BasemapHttp(unittest.TestCase):
         self.assertEqual(st, 200)
 
 
+OA = load("osm_addresses_mod", ROOT / "tools" / "osm_addresses.py")
+
+
+class FakeOverpass:
+    """Локальный «Overpass»: отвечает JSON по POST data=..., умеет имитировать сбои."""
+
+    def __init__(self, elements, fail_first=0, too_big_for=None):
+        self.elements, self.fail_first, self.too_big_for = elements, fail_first, too_big_for
+        self.queries = []
+        fake = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
+                q = urllib.parse.parse_qs(body)["data"][0]
+                fake.queries.append(q)
+                if fake.fail_first > 0:
+                    fake.fail_first -= 1
+                    self.send_response(504)
+                    self.end_headers()
+                    return
+                if fake.too_big_for and fake.too_big_for in q:
+                    out = {"elements": [], "remark": "runtime error: Query timed out in \"query\" at line 1 after 240 seconds."}
+                else:
+                    out = {"version": 0.6, "elements": fake.elements}
+                data = json.dumps(out).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+        self.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = "http://127.0.0.1:%d/api/interpreter" % self.srv.server_address[1]
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+ELEMENTS = [
+    {"type": "way", "id": 1, "center": {"lat": 55.889, "lon": 37.593}, "tags": {"building": "yes", "addr:street": "улица Лескова", "addr:housenumber": "5"}},
+    {"type": "relation", "id": 2, "center": {"lat": 55.776, "lon": 37.528}, "tags": {"building": "yes", "addr:street": "Хорошёвское шоссе", "addr:housenumber": "76к4"}},
+    {"type": "node", "id": 3, "lat": 55.7461, "lon": 37.6182, "tags": {"addr:street": "Софийская набережная", "addr:housenumber": "24/2с2", "shop": "x"}},
+    {"type": "way", "id": 4, "center": {"lat": 55.99, "lon": 37.215}, "tags": {"building": "yes", "addr:city": "Зеленоград", "addr:housenumber": "к418"}},
+    {"type": "way", "id": 5, "tags": {"building": "yes", "addr:street": "без координат", "addr:housenumber": "1"}},
+    {"type": "way", "id": 6, "center": {"lat": 55.7, "lon": 37.6}, "tags": {"building": "yes"}},
+]
+
+
+class OsmAddresses(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self.tmp.name) / "osm" / "moscow_addresses.json"
+        OA.MIN_COUNT = 1
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_query_limits_area_and_square(self):
+        q = OA.overpass_query((55.1, 36.8, 55.5, 37.2))
+        self.assertIn('area["ISO3166-2"="RU-MOW"]', q)
+        self.assertIn("(area.a)(55.10000,36.80000,55.50000,37.20000)", q)
+        self.assertIn("out tags center;", q)
+        self.assertEqual(len(OA.split_bbox(OA.MOSCOW_BBOX, 4, 4)), 16)
+
+    def test_parse_elements(self):
+        rows = OA.parse_elements({"elements": ELEMENTS})
+        self.assertEqual(rows["way/1"], ["w", "улица Лескова", "5", "", "", 55.889, 37.593])
+        self.assertEqual(rows["node/3"][0], "n")
+        self.assertEqual(rows["way/4"][4], "Зеленоград")
+        self.assertNotIn("way/5", rows)  # без координат
+        self.assertNotIn("way/6", rows)  # без номера дома
+        with self.assertRaises(OA.TooBig):
+            OA.parse_elements({"elements": [], "remark": "runtime error: Query timed out"})
+
+    def test_download_with_mirror_and_split(self):
+        bad = FakeOverpass(ELEMENTS, fail_first=10**6)  # первое зеркало всегда отвечает 504
+        first = "(area.a)(%.5f,%.5f,%.5f,%.5f)" % OA.split_bbox(OA.MOSCOW_BBOX, 2, 2)[0]
+        good = FakeOverpass(ELEMENTS * 30, too_big_for=first)  # первый квадрат «слишком большой»
+        try:
+            prog = BM.Progress()
+            doc = OA.download(prog, out=self.out, endpoints=[bad.url, good.url], grid=(2, 2), pause=0)
+            st = prog.snapshot()
+            self.assertEqual(st["state"], "done", st)
+            self.assertEqual(doc["count"], 4)  # дубли из разных квадратов схлопнуты
+            self.assertEqual(doc["endpoint"], good.url)
+            self.assertEqual(st["total"], 7)  # 4 квадрата, первый разделён на 4
+            self.assertEqual(len(bad.queries), 1, "после отказа зеркала остальные квадраты идут на рабочее")
+            saved = json.loads(self.out.read_text(encoding="utf-8"))
+            self.assertEqual(saved["fields"][:3], ["type", "street", "housenumber"])
+            info = OA.status(self.out)
+            self.assertEqual((info["exists"], info["count"]), (True, 4))
+            self.assertTrue(info["downloadedAt"].startswith("20"))
+        finally:
+            bad.close()
+            good.close()
+
+    def test_failure_keeps_previous_file(self):
+        self.out.parent.mkdir(parents=True)
+        self.out.write_text('{"format":"osm-addresses","downloadedAt":"old","count":1,"rows":[]}', encoding="utf-8")
+        empty = FakeOverpass([])
+        try:
+            prog = BM.Progress()
+            self.assertIsNone(OA.download(prog, out=self.out, endpoints=[empty.url], grid=(1, 1), pause=0))
+            self.assertEqual(prog.snapshot()["state"], "error")
+            self.assertIn("мало адресов", prog.snapshot()["message"])
+            self.assertEqual(OA.status(self.out)["downloadedAt"], "old")
+        finally:
+            empty.close()
+
+
+class AddressesApi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.fake = FakeOverpass(ELEMENTS * 40)
+        os.environ["MCA_OVERPASS_URL"] = cls.fake.url
+        cls.serve = load("serve_addresses", ROOT / "serve.py")
+        cls.serve.ADDRESSES_FILE = Path(cls.tmp.name) / "osm" / "moscow_addresses.json"
+        cls.serve.osm_addresses.MIN_COUNT = 1
+        cls.serve.GEOCODED_FILE = Path(cls.tmp.name) / "geocoded_houses.csv"
+        cls.app = cls.serve.Server(("127.0.0.1", 0), cls.serve.Handler)
+        threading.Thread(target=cls.app.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("MCA_OVERPASS_URL", None)
+        cls.app.shutdown()
+        cls.app.server_close()
+        cls.fake.close()
+        cls.tmp.cleanup()
+
+    def api(self, path, data=None):
+        port = self.app.server_address[1]
+        body = json.dumps(data).encode() if data is not None else None
+        r = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=body, headers={
+            "Host": "localhost:%d" % port, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_download_and_status(self):
+        st, body = self.api("/api/addresses")
+        self.assertEqual((st, body["exists"]), (200, False))
+        st, body = self.api("/api/addresses/download", {})
+        self.assertEqual(st, 202, body)
+        for _ in range(200):
+            st, body = self.api("/api/addresses")
+            if body["job"]["state"] != "running":
+                break
+            threading.Event().wait(0.05)
+        self.assertEqual(body["job"]["state"], "done", body["job"])
+        self.assertEqual((body["exists"], body["count"]), (True, 4))
+        self.assertEqual(body["url"], "data/local/osm/moscow_addresses.json")
+
+    def test_save_geocoded_csv(self):
+        csv_text = "unom,lat,lon,source,accuracy,status,address\r\n5000002,55.7,37.6,OSM,здание,osm,\"Лескова ул., д.5\"\r\n"
+        st, body = self.api("/api/geocoded", {"csv": csv_text})
+        self.assertEqual(st, 200, body)
+        self.assertEqual(self.serve.GEOCODED_FILE.read_bytes(), b"\xef\xbb\xbf" + csv_text.encode("utf-8"))
+        st, body = self.api("/api/geocoded", {"csv": "rm -rf /"})
+        self.assertEqual(st, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

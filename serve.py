@@ -5,6 +5,8 @@
 Отличия от `python -m http.server 8000`:
   * поддерживает HTTP Range, нужно для офлайн-карты data/local/moscow.pmtiles;
   * скачивает и обновляет офлайн-карту Москвы по кнопке в приложении (tools/basemap.py);
+  * скачивает адреса зданий Москвы из OpenStreetMap для поиска координат домов (tools/osm_addresses.py)
+    и сохраняет найденные координаты в data/local/geocoded_houses.csv;
   * слушает только 127.0.0.1 (данные не видны в локальной сети);
   * правильные MIME-типы для .js/.mjs/.pmtiles/.geojson и отключённый кэш для файлов приложения;
   * локальный API «Папка с выгрузками»: приложение читает ваши файлы прямо с диска по путям из
@@ -30,6 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
 import basemap  # noqa: E402
+import osm_addresses  # noqa: E402
 
 DEFAULT_CONFIG = ROOT / "config" / "sources.default.json"
 LOCAL_CONFIG = Path(os.environ.get("MCA_SOURCES_CONFIG") or (ROOT / "config" / "sources.local.json"))
@@ -45,6 +48,8 @@ ROLES = {
 ALLOWED_EXT = {".csv", ".xlsx", ".txt", ".json", ".geojson"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 BASEMAP_FILE = Path(os.environ.get("MCA_BASEMAP_FILE") or basemap.OUTPUT)
+ADDRESSES_FILE = osm_addresses.OUTPUT
+GEOCODED_FILE = ROOT / "data" / "local" / "geocoded_houses.csv"
 
 
 # ---------------------------------------------------------------- настройки источников
@@ -214,6 +219,51 @@ def start_basemap(data):
     return True
 
 
+# ---------------------------------------------------------------- адреса OSM и найденные координаты
+
+ADDR_JOB = basemap.Progress()
+_addr_thread = None
+
+
+def addresses_state():
+    st = osm_addresses.status(ADDRESSES_FILE)
+    st["job"] = ADDR_JOB.snapshot()
+    st["geocodedFile"] = {"path": str(GEOCODED_FILE), "exists": GEOCODED_FILE.is_file()}
+    return st
+
+
+def start_addresses(data):
+    global _addr_thread
+    endpoints = None
+    env = os.environ.get("MCA_OVERPASS_URL")
+    if env:
+        endpoints = [u for u in env.split(",") if u.startswith(("http://", "https://"))]
+    with _basemap_lock:
+        if _addr_thread and _addr_thread.is_alive():
+            return False
+        ADDR_JOB.reset()
+        ADDR_JOB.set(state="running", stage="Подготовка")
+        kwargs = {"out": ADDRESSES_FILE, "endpoints": endpoints}
+        if env:  # свой сервер Overpass (или тестовый): без пауз и проверки объёма
+            kwargs.update(pause=0, min_count=1)
+        _addr_thread = threading.Thread(target=osm_addresses.download, args=(ADDR_JOB,), daemon=True, kwargs=kwargs)
+        _addr_thread.start()
+    return True
+
+
+def save_geocoded(data):
+    """Копия найденных координат на диске: data/local/geocoded_houses.csv (её можно снова импортировать)."""
+    csv_text = data.get("csv") if isinstance(data, dict) else None
+    if not isinstance(csv_text, str) or not csv_text.startswith("unom,"):
+        raise ValueError("Ожидается CSV с колонками unom, lat, lon")
+    GEOCODED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = GEOCODED_FILE.with_name(GEOCODED_FILE.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(csv_text)
+    basemap._replace(tmp, GEOCODED_FILE)
+    return {"saved": str(GEOCODED_FILE), "size": GEOCODED_FILE.stat().st_size}
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -275,7 +325,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not self._local_request():
             return self._json(403, {"error": "Доступ только с localhost"})
         route = urllib.parse.urlsplit(self.path).path
-        if route not in ("/api/sources", "/api/open-folder", "/api/basemap/download", "/api/basemap/cancel"):
+        if route not in ("/api/sources", "/api/open-folder", "/api/basemap/download", "/api/basemap/cancel",
+                         "/api/addresses/download", "/api/addresses/cancel", "/api/geocoded"):
             return self._json(404, {"error": "Нет такого метода"})
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json(415, {"error": "Нужен Content-Type: application/json"})
@@ -283,9 +334,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._open_folder()
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length > 65536:
+            if length > (64 * 1024 * 1024 if route == "/api/geocoded" else 65536):
                 return self._json(413, {"error": "Слишком большой запрос"})
             data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if route == "/api/geocoded":
+                return self._json(200, save_geocoded(data))
+            if route == "/api/addresses/cancel":
+                ADDR_JOB.cancel.set()
+                return self._json(200, addresses_state())
+            if route == "/api/addresses/download":
+                if not start_addresses(data):
+                    return self._json(409, {"error": "Загрузка адресов уже идёт", **addresses_state()})
+                return self._json(202, addresses_state())
             if route == "/api/basemap/cancel":
                 BASEMAP_JOB.cancel.set()
                 return self._json(200, basemap_state())
@@ -327,6 +387,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(200, sources_state())
         if path == "/api/basemap":
             return self._json(200, basemap_state())
+        if path == "/api/addresses":
+            return self._json(200, addresses_state())
         m = re.fullmatch(r"/api/source/([a-z]+)", path)
         if not m:
             return self._json(404, {"error": "Нет такого метода"})
@@ -410,7 +472,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Локальный сервер Moscow Coverage Analytics")
+    ap = argparse.ArgumentParser(description="Локальный сервер «Аналитики покрытия»")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-browser", action="store_true", help="не открывать браузер автоматически")
@@ -428,7 +490,7 @@ def main():
         return 1
     st = sources_state()
     bm = basemap.status(BASEMAP_FILE)
-    print("Moscow Coverage Analytics: %s" % url)
+    print("Аналитика покрытия: %s" % url)
     if bm["exists"]:
         build = (bm.get("meta") or {}).get("build") or ""
         print("Офлайн-карта: %s (%.0f МБ%s)" % (BASEMAP_FILE, bm["size"] / 1e6, ", сборка %s" % build if build else ""))
