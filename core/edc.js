@@ -110,6 +110,10 @@ export function detectKind(header) {
   const has = (s) => hs.some((h) => h === lowerYo(s));
   const pre = (s) => hs.some((h) => h.startsWith(lowerYo(s)) || lowerYo(s).startsWith(h) && h.length >= 8);
   const merged = has('Статистика 2026: способ сопоставления');
+  // Выгрузки, которые для импорта не нужны (контрольные SQL № 1 и № 5, отдельная выборка SQL № 6)
+  if (has('Тип дома в ЕДЦ (house_type)') || pre('Число последних версий адресных записей')) return 'sql1';
+  if (has('Взято строк привязок')) return 'sql5';
+  if (has('Есть привязка платного дефекта') || (has('ID платных дефектов') && has('ID обслуживающих организаций'))) return 'sql6';
   if (has('Уровень агрегации') && has('ID адреса для сопоставления')) return 'requests';
   if (has('Корневой ID подъезда') && has('Подъезд (номер либо ID)')) return merged ? 'entrances_merged' : 'entrances';
   if (has('Корневой ID адреса') && pre('Количество подъездов в реестре ЕДЦ')) return merged ? 'houses_merged' : 'houses';
@@ -125,8 +129,15 @@ export const KIND_LABEL = {
   houses_merged: 'Объединённый «Дома_ЕДЦ_2026_с_заявками.csv»',
   entrances_merged: 'Объединённый «Подъезды_ЕДЦ_2026_с_заявками.csv»',
   geo: 'Геоданные (CSV/GeoJSON)',
+  sql1: 'SQL № 1 — контрольный, для импорта не нужен',
+  sql5: 'SQL № 5 — контрольный, для импорта не нужен',
+  sql6: 'SQL № 6 — платные дефекты, для импорта не нужен',
+  doc: 'Документ — для импорта не нужен',
   unknown: 'Не распознан',
 };
+
+/** Файлы, которые мастер импорта пропускает с пояснением (а не считает ошибкой). */
+export const SKIP_KINDS = new Set(['sql1', 'sql5', 'sql6', 'doc']);
 
 // ---------- ключи (как в S2) ----------
 

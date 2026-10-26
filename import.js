@@ -2,7 +2,8 @@
 // Снимок применяется только после подтверждения; накопительные заявки 2026 заменяются, а не складываются.
 
 import { h, clear, fmt, icon, modal, toast, plural } from './ui.js';
-import { KIND_LABEL } from './core/edc.js';
+import { KIND_LABEL, SKIP_KINDS } from './core/edc.js';
+import { getSourcesState, fetchSourceFiles, openSourcesDialog } from './sources.js';
 import { NA_REASON } from './analytics.js';
 
 export class WorkerClient {
@@ -42,7 +43,8 @@ export class WorkerClient {
 
 function classify(detected) {
   const by = (k) => detected.filter((d) => d.kind === k);
-  const plan = { mji: by('mji')[0] || null, edc: null, geo: by('geo'), control: by('control'), unknown: by('unknown'), notes: [] };
+  const plan = { mji: by('mji')[0] || null, edc: null, geo: by('geo'), control: by('control'), unknown: by('unknown'), notes: [],
+    skipped: detected.filter((d) => SKIP_KINDS.has(d.kind)) };
   const H = by('houses')[0]; const E = by('entrances')[0]; const R = by('requests')[0];
   const HM = by('houses_merged')[0]; const EM = by('entrances_merged')[0];
   if (H || E) {
@@ -84,6 +86,8 @@ const MODE_LABEL = {
 export function openImportWizard(app, initialFiles = []) {
   let files = [...initialFiles];
   let detected = [];
+  let sourcesState = null;
+  getSourcesState().then((st) => { sourcesState = st; if (st && !files.length) renderSelect(); });
   let matchByNumber = false;
   // Закрытие окна крестиком/Esc во время предпросмотра = отмена импорта (staging-снимок удаляется).
   let onDismiss = null;
@@ -113,15 +117,32 @@ export function openImportWizard(app, initialFiles = []) {
     h('div', { class: 'small muted', style: { marginTop: '4px' } }, 'МЖИ (.xlsx/.csv) · ЕДЦ: три CSV SQL № 2/3/4 или два объединённых CSV · заявки отдельно · геоданные (.csv/.geojson) · контрольные .txt'));
     const list = h('div', { class: 'file-list' }, detected.map((d, i) => h('div', { class: 'file-item' },
       h('div', null, h('div', { class: 'fn' }, d.name), h('div', { class: 'small muted' }, fmt.bytes(d.size), d.error ? ` · ошибка: ${d.error}` : '')),
-      h('span', { class: `chip ${d.kind === 'unknown' ? 'warn' : 'accent'}` }, d.kind === 'control' ? 'Контрольный отчёт S2' : KIND_LABEL[d.kind] || d.kind),
+      h('span', { class: `chip ${d.kind === 'unknown' ? 'warn' : SKIP_KINDS.has(d.kind) ? '' : 'accent'}` }, d.kind === 'control' ? 'Контрольный отчёт S2' : KIND_LABEL[d.kind] || d.kind),
       h('button', { class: 'icon-btn', 'aria-label': 'Убрать файл', onclick: () => { files.splice(i, 1); redetect(); } }, icon('close', 16)))));
-    const body = h('div', { class: 'stack' }, zone, input, detected.length ? list : null);
+    const fromFolder = sourcesState ? h('div', { class: 'actions-row' },
+      h('button', {
+        class: 'btn btn-sm', onclick: async (ev) => {
+          ev.target.disabled = true;
+          try {
+            const st = await getSourcesState();
+            const roles = Object.keys(st.files).filter((r) => st.files[r].exists);
+            if (!roles.length) { toast('В папке выгрузок не найдено ни одного файла — настройте путь и имена', 'error'); return; }
+            await addFiles(await fetchSourceFiles(st, roles, () => {}));
+          } catch (e) { toast(e.message, 'error'); } finally { ev.target.disabled = false; }
+        },
+      }, icon('database', 14), 'Взять из папки выгрузок'),
+      h('button', { class: 'btn btn-sm btn-ghost', onclick: () => openSourcesDialog(app) }, 'Настроить путь и имена файлов')) : null;
+    const body = h('div', { class: 'stack' }, zone, input, fromFolder, detected.length ? list : null);
     const steps = [];
     if (plan.mji) steps.push(h('li', null, 'Реестр МЖИ: ', h('b', null, plan.mji.name)));
     if (plan.edc) steps.push(h('li', null, 'ЕДЦ: ', MODE_LABEL[plan.edc.mode]));
     if (plan.geo.length) steps.push(h('li', null, `Геоданные: ${plan.geo.map((g) => g.name).join(', ')}`));
     if (steps.length) body.append(h('div', { class: 'note' }, icon('list'), h('div', null, h('b', null, 'План импорта'), h('ol', { style: { margin: '4px 0 0', paddingLeft: '18px' } }, steps))));
     for (const n of plan.notes) body.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, n)));
+    if (plan.skipped.length) {
+      body.append(h('div', { class: 'note' }, icon('info'), h('div', null, h('b', null, 'Будут пропущены — для импорта не нужны: '),
+        plan.skipped.map((x) => x.name).join('; '), '.')));
+    }
     for (const u of plan.unknown) {
       body.append(h('div', { class: 'note error' }, icon('warn'), h('div', null, h('b', null, `${u.name}: формат не распознан.`),
         h('div', { class: 'small' }, u.error ? u.error : `Заголовки: ${(u.header || []).slice(0, 12).join(' | ')}`))));

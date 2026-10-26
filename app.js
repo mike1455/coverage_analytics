@@ -5,6 +5,7 @@
 import { h, $, $$, clear, fmt, icon, toast, modal, confirmDialog, download, debounce, select, statusBadge, plural, STATUS } from './ui.js';
 import { getAll, get, put, del, getActive, getMeta, setMeta, tx, storageEstimate, requestPersistence, STORES, getJoined } from './storage.js';
 import { WorkerClient, openImportWizard, discoverLocal, fetchLocalFiles } from './import.js';
+import { getSourcesState, sourcesSummary, openSourcesDialog } from './sources.js';
 import { MapView } from './map.js';
 import { openCard, openEdcCard, closeCard, nominatimConsent } from './card.js';
 import { barChart, stackBar, legend, okrugTiles, hideTip } from './charts.js';
@@ -28,7 +29,7 @@ const app = {
   state: {
     active: { mji: null, edc: null }, snapshots: [], rows: [], rowsByU: new Map(), edcStats: null, joinedAt: null,
     geo: new Map(), zones: [], overrides: new Map(), boundaries: { okrug: null, area: null }, snapMji: null, snapEdc: null,
-    mjiGone: [], edcGoneCount: 0, addr: [], local: [],
+    mjiGone: [], edcGoneCount: 0, addr: [], local: [], sources: null,
   },
   f: { okrug: '', area: '', quarter: '', reqMetric: 'total' },
   ui: {
@@ -72,6 +73,7 @@ async function boot() {
   requestPersistence();
   await loadState();
   app.state.local = await discoverLocal();
+  app.state.sources = await getSourcesState();
   const v = location.hash.slice(1);
   go(VIEWS.includes(v) ? v : 'map', false);
 }
@@ -104,8 +106,10 @@ async function loadState() {
 app.reload = async () => {
   await loadState();
   app.state.local = await discoverLocal();
+  app.state.sources = await getSourcesState();
   render();
 };
+app.openSources = () => openSourcesDialog(app);
 
 /** Лёгкое обновление после правок геоданных (без пересчёта сопоставления). */
 async function reloadGeo() {
@@ -296,7 +300,10 @@ function onboarding() {
       step(1, 'Реестр МЖИ', 'XLSX или CSV с колонками Код, Округ, Район, Наименование/адрес, ФИАС, UNOM, Управляющая организация. Сразу даёт подлинные численности МКД по 12 округам.', !!st.snapMji),
       step(2, 'Выгрузки ЕДЦ', 'Три CSV из SQL № 2/3/4 (объединение по правилам S2 выполняется здесь же) или два объединённых CSV. Рейтинг покрытия появится только после этого шага.', !!st.snapEdc),
       step(3, 'Геопривязка', 'Координаты 20–50 домов одного района (OSM по кнопке, вручную на карте или импорт CSV/GeoJSON) — для карты и тепловой карты.', st.geo.size > 0)),
-    h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-primary', onclick: () => openImportWizard(app) }, icon('upload', 16), 'Загрузить файлы')));
+    h('div', { class: 'actions-row' },
+      st.sources ? h('button', { class: 'btn btn-primary', onclick: () => openSourcesDialog(app) }, icon('database', 16), 'Загрузить из папки выгрузок') : null,
+      h('button', { class: `btn ${st.sources ? '' : 'btn-primary'}`, onclick: () => openImportWizard(app) }, icon('upload', 16), 'Выбрать файлы вручную')));
+  if (st.sources) box.append(sourcesSummary(app, st.sources));
   if (local.length) {
     box.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', null, 'Найдены файлы в папке data/local'), h('span', { class: 'sub' }, 'папка исключена из git')),
       h('div', { class: 'file-list' }, local.map((f) => h('div', { class: 'file-item', style: { gridTemplateColumns: '1fr' } }, h('div', { class: 'fn' }, f.name)))),
@@ -744,6 +751,7 @@ function renderImport() {
     h('p', null, 'Ежемесячное обновление: выберите новые выгрузки → проверка и предпросмотр изменений → подтверждение. Снимок заменяется атомарно; ручные геоданные и соответствия сохраняются.')),
   h('button', { class: 'btn btn-primary', onclick: () => openImportWizard(app) }, icon('upload', 16), 'Обновить данные')));
   v.append(h('div', { class: 'grid-3', style: { marginBottom: '14px' } }, sourceCardMji(), sourceCardEdc(), sourceCardGeo()));
+  v.append(h('div', { style: { marginBottom: '14px' } }, sourcesSummary(app, st.sources)));
   const local = st.local.filter((f) => /\.(xlsx|csv|geojson|json)$/i.test(f.name));
   if (local.length) {
     v.append(h('div', { class: 'card', style: { marginBottom: '14px' } }, h('div', { class: 'card-head' }, h('h3', null, `Файлы в data/local (${local.length})`),

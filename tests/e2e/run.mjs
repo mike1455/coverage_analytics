@@ -6,7 +6,8 @@
 // Скриншоты: tests/e2e/output/
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
 import assert from 'node:assert/strict';
@@ -19,6 +20,15 @@ let chromium;
 try { ({ chromium } = require('playwright')); } catch (e) { console.error('Playwright не найден: npm i -D playwright && npx playwright install chromium'); process.exit(2); }
 
 const OUT = join(ROOT, 'tests', 'e2e', 'output');
+// «Папка с выгрузками» для теста: копии синтетических фикстур под реальными именами выгрузок DBeaver
+const SRC_DIR = mkdtempSync(join(tmpdir(), 'mca-e2e-'));
+const SOURCES_CONFIG = join(SRC_DIR, 'sources.local.json');
+const USER_NAMES = {
+  mji: '19.10.26_МКД_SELECT_t_content_code_AS_Код_t_content_District_AS_Округ_t_cont_202610191348.csv',
+  houses: 'Запрос № 2. Выгрузка № 1 — ВСЕ адреса, одна строка на дом.csv',
+  entrances: 'Запрос № 3. Выгрузка № 2 — ВСЕ адреса и подъезды, одна строка на подъезд.csv',
+  requests: 'Запрос № 4. Выгрузка № 3 — заявки 2026 по дому И по подъезду в ОДНОМ файле.csv',
+};
 mkdirSync(OUT, { recursive: true });
 const log = (...a) => console.log('•', ...a);
 
@@ -29,7 +39,7 @@ function freePort() {
 async function startServer(port) {
   const py = process.env.PYTHON || (process.platform === 'win32' ? 'py' : 'python3');
   const args = process.platform === 'win32' && !process.env.PYTHON ? ['-3', 'serve.py', '--port', String(port), '--no-browser'] : ['serve.py', '--port', String(port), '--no-browser'];
-  const proc = spawn(py, args, { cwd: ROOT, stdio: 'ignore' });
+  const proc = spawn(py, args, { cwd: ROOT, stdio: 'ignore', env: { ...process.env, MCA_SOURCES_CONFIG: SOURCES_CONFIG } });
   for (let i = 0; i < 50; i++) {
     try { const r = await fetch(`http://127.0.0.1:${port}/index.html`); if (r.ok) return proc; } catch (_) { /* ждём */ }
     await new Promise((r) => setTimeout(r, 200));
@@ -61,11 +71,15 @@ async function uiKpi(page) {
 // Playwright молча отбрасывает пути с кириллицей — передаём содержимое файлов с исходными именами.
 const payload = (paths) => paths.map((p) => ({ name: p.split(/[\\/]/).pop(), mimeType: 'text/csv', buffer: readFileSync(p) }));
 
-async function importViaWizard(page, files, { expectJobs = 1, shot } = {}) {
+async function importViaWizard(page, files, opts = {}) {
   await page.click('.topbar .btn-primary');
   await page.waitForSelector('.modal input[type=file]', { state: 'attached' });
   await page.setInputFiles('.modal input[type=file]', payload(files));
   await page.waitForFunction((n) => document.querySelectorAll('.modal .file-item').length === n, files.length, { timeout: 30000 });
+  return runWizard(page, opts);
+}
+
+async function runWizard(page, { expectJobs = 1, shot } = {}) {
   await page.click('text=Проверить и показать изменения');
   const previews = [];
   for (let i = 0; i < expectJobs; i++) {
@@ -81,7 +95,18 @@ async function importViaWizard(page, files, { expectJobs = 1, shot } = {}) {
   return previews;
 }
 
+function prepareSourceFolder() {
+  copyFileSync(join(FIX, 'mji_synthetic.csv'), join(SRC_DIR, USER_NAMES.mji));
+  copyFileSync(join(FIX, '01_дома.csv'), join(SRC_DIR, USER_NAMES.houses));
+  copyFileSync(join(FIX, '02_подъезды.csv'), join(SRC_DIR, USER_NAMES.entrances));
+  copyFileSync(join(FIX, '03_заявки_2026.csv'), join(SRC_DIR, USER_NAMES.requests));
+  writeFileSync(join(SRC_DIR, 'Запрос № 1. Какие типы домов есть в ЕДЦ (контроль, без экспорта).csv'), '"Тип дома в ЕДЦ (house_type)","Пример адреса"\nЖилое,x\n');
+  // Имя заявок намеренно с ошибкой — тест исправит его в окне
+  writeFileSync(SOURCES_CONFIG, JSON.stringify({ folder: SRC_DIR, files: { ...USER_NAMES, requests: 'опечатка.csv', geo: '' } }));
+}
+
 (async () => {
+  prepareSourceFolder();
   const port = await freePort();
   const server = await startServer(port);
   const browser = await chromium.launch();
@@ -91,15 +116,26 @@ async function importViaWizard(page, files, { expectJobs = 1, shot } = {}) {
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource|ERR_|tile/i.test(m.text())) errors.push(m.text()); });
     await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('text=Загрузить файлы');
+    await page.waitForSelector('text=Загрузить из папки выгрузок');
     await page.screenshot({ path: join(OUT, '01_onboarding.png') });
 
     const exp = expectedKpi();
     log('ожидаемые KPI (node):', JSON.stringify(pick(exp.kpi)));
 
-    // 1) МЖИ + три сырых CSV ЕДЦ одной операцией
+    // 1) МЖИ + три сырых CSV ЕДЦ из «папки с выгрузками»: имена как у DBeaver, одно имя исправляется в окне
     const raw = ['01_дома.csv', '02_подъезды.csv', '03_заявки_2026.csv'].map((f) => join(FIX, f));
-    const pv = await importViaWizard(page, [join(FIX, 'mji_synthetic.csv'), ...raw], { expectJobs: 2, shot: '02_preview.png' });
+    await page.click('text=Загрузить из папки выгрузок');
+    await page.waitForSelector('.modal input[aria-label="SQL № 4 — заявки 2026"]');
+    assert.equal(await page.locator('.modal .badge.st-none').count(), 1, 'неверное имя файла заявок помечено «не найден»');
+    await page.fill('.modal input[aria-label="SQL № 4 — заявки 2026"]', USER_NAMES.requests);
+    await page.click('.modal button:has-text("Сохранить и проверить")');
+    await page.waitForFunction(() => document.querySelectorAll('.modal .badge.st-full').length === 5); // папка + 4 файла
+    await page.screenshot({ path: join(OUT, '01b_sources.png') });
+    assert.equal(JSON.parse(readFileSync(SOURCES_CONFIG, 'utf8')).files.requests, USER_NAMES.requests, 'имя сохранено в config');
+    await page.click('.modal button:has-text("Загрузить отмеченные")');
+    await page.waitForFunction(() => document.querySelectorAll('.modal .file-item').length === 4, null, { timeout: 30000 });
+    assert.deepEqual((await page.locator('.modal .file-item .fn').allTextContents()).sort(), Object.values(USER_NAMES).sort());
+    const pv = await runWizard(page, { expectJobs: 2, shot: '02_preview.png' });
     assert.equal(pv[0].source, 'mji');
     assert.equal(pv[1].source, 'edc');
     assert.equal(pv[1].report.control.houses.rows, 400);
@@ -114,6 +150,15 @@ async function importViaWizard(page, files, { expectJobs = 1, shot } = {}) {
     const entrLevel = mergeRaw().entrances.reduce((s, e) => s + e.q[0], 0);
     assert.notEqual(k.req, houseLevel + entrLevel);
     log('двойного счёта нет: заявок', k.req);
+
+    // Повторное открытие: все четыре файла отмечены как «уже загружен» и не выбраны
+    await page.click('.nav-item[data-view="import"]');
+    await page.click('#view-import button:has-text("Папка и имена файлов")');
+    await page.waitForSelector('.modal input[aria-label="SQL № 4 — заявки 2026"]');
+    assert.equal(await page.locator('.modal :text("уже загружен в приложение")').count(), 4);
+    assert.equal(await page.locator('.modal input[type=checkbox]:checked').count(), 0);
+    await page.click('.modal button:has-text("Закрыть")');
+    log('загрузка из папки: имена вводятся в окне, загруженные файлы распознаются при повторном открытии');
 
     // 2) Повторный импорт идентичного снимка → 0 изменений, KPI те же
     const pv2 = await importViaWizard(page, raw);
@@ -213,6 +258,7 @@ async function importViaWizard(page, files, { expectJobs = 1, shot } = {}) {
   } finally {
     await browser.close();
     server.kill();
+    rmSync(SRC_DIR, { recursive: true, force: true });
   }
 })().catch((e) => { console.error('E2E ОШИБКА:', e); process.exit(1); });
 

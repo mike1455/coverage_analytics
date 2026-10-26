@@ -5,6 +5,8 @@ import datetime as dt
 import filecmp
 import http.server
 import importlib.util
+import json
+import os
 import socketserver
 import subprocess
 import sys
@@ -12,6 +14,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -123,6 +126,91 @@ class ServeRange(unittest.TestCase):
 
     def test_unsatisfiable(self):
         self.assertEqual(self.get({"Range": "bytes=%d-" % (len(self.body) + 10)})[0], 416)
+
+
+class SourcesApi(unittest.TestCase):
+    """API «Папка с выгрузками»: настройки, статусы, отдача файлов, защита от чужих сайтов."""
+
+    NAMES = {
+        "houses": "Запрос № 2. Выгрузка № 1 — ВСЕ адреса, одна строка на дом.csv",
+        "requests": "Запрос № 4. Выгрузка № 3 — заявки 2026 по дому И по подъезду в ОДНОМ файле.csv",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.serve = load("serve_sources", ROOT / "serve.py")
+        cls.tmp = tempfile.TemporaryDirectory()
+        base = Path(cls.tmp.name)
+        cls.folder = base / "ФАЙЛЫ ИТОГ"
+        cls.folder.mkdir()
+        (cls.folder / cls.NAMES["houses"]).write_bytes((FIX / "01_дома.csv").read_bytes())
+        (cls.folder / "секрет.exe").write_bytes(b"x")
+        cls.serve.DEFAULT_CONFIG = base / "default.json"
+        cls.serve.LOCAL_CONFIG = base / "local.json"
+        cls.serve.DEFAULT_CONFIG.write_text(json.dumps({"folder": "%MCA_TEST_DIR%", "files": {"houses": cls.NAMES["houses"], "requests": cls.NAMES["requests"]}}), encoding="utf-8")
+        os.environ["MCA_TEST_DIR"] = str(cls.folder)
+        cls.httpd = cls.serve.Server(("127.0.0.1", 0), cls.serve.Handler)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.tmp.cleanup()
+
+    def req(self, path, data=None, headers=None, method=None):
+        h = {"Host": "localhost:%d" % self.port, **(headers or {})}
+        body = json.dumps(data).encode("utf-8") if data is not None else None
+        if body is not None and "Content-Type" not in h:
+            h["Content-Type"] = "application/json"
+        r = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), data=body, headers=h, method=method)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read()
+
+    def test_state_and_env_expansion(self):
+        st, _, b = self.req("/api/sources")
+        self.assertEqual(st, 200)
+        d = json.loads(b)
+        self.assertTrue(d["folderExists"])
+        self.assertTrue(d["files"]["houses"]["exists"])
+        self.assertFalse(d["files"]["requests"]["exists"])
+        self.assertEqual(d["files"]["geo"]["reason"], "имя не задано")
+        self.assertIn(self.NAMES["houses"], d["folderFiles"])
+        self.assertNotIn("секрет.exe", d["folderFiles"])
+
+    def test_file_download_keeps_bytes_and_name(self):
+        st, h, b = self.req("/api/source/houses")
+        self.assertEqual(st, 200)
+        self.assertEqual(b, (FIX / "01_дома.csv").read_bytes())
+        self.assertEqual(urllib.parse.unquote(h["X-File-Name"]), self.NAMES["houses"])
+
+    def test_save_names_and_full_path(self):
+        (self.folder / "другое имя.csv").write_bytes(b"a,b\n")
+        st, _, b = self.req("/api/sources", {"folder": str(self.folder), "files": {"houses": self.NAMES["houses"], "requests": "другое имя.csv", "mji": str(self.folder / "другое имя.csv")}})
+        self.assertEqual(st, 200)
+        d = json.loads(b)
+        self.assertTrue(d["files"]["requests"]["exists"])
+        self.assertTrue(d["files"]["mji"]["exists"], "полный путь вместо имени")
+        self.assertEqual(json.loads(self.serve.LOCAL_CONFIG.read_text(encoding="utf-8"))["files"]["requests"], "другое имя.csv")
+        self.req("/api/sources", {"folder": "%MCA_TEST_DIR%", "files": {"houses": self.NAMES["houses"], "requests": self.NAMES["requests"]}})
+
+    def test_disallowed_extension_not_served(self):
+        self.req("/api/sources", {"folder": str(self.folder), "files": {"geo": "секрет.exe"}})
+        st, _, b = self.req("/api/sources")
+        self.assertIn("недопустимое расширение", json.loads(b)["files"]["geo"]["reason"])
+        self.assertEqual(self.req("/api/source/geo")[0], 404)
+        self.req("/api/sources", {"folder": "%MCA_TEST_DIR%", "files": {"houses": self.NAMES["houses"], "requests": self.NAMES["requests"]}})
+
+    def test_foreign_host_and_bad_requests(self):
+        self.assertEqual(self.req("/api/sources", headers={"Host": "evil.example:80"})[0], 403)
+        self.assertEqual(self.req("/api/source/houses", headers={"Host": "evil.example"})[0], 403)
+        self.assertEqual(self.req("/api/source/unknown")[0], 404)
+        st = self.req("/api/sources", data={"folder": "x"}, headers={"Content-Type": "text/plain"})[0]
+        self.assertEqual(st, 415, "простые запросы с других сайтов не могут менять настройки")
 
 
 class Basemap(unittest.TestCase):

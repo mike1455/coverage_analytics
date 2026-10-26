@@ -112,6 +112,7 @@ async function detectFiles(files) {
     try {
       if (/\.(geo)?json$/i.test(f.name)) { out.push({ name: f.name, size: f.size, kind: 'geo' }); continue; }
       if (/\.txt$/i.test(f.name)) { out.push({ name: f.name, size: f.size, kind: 'control' }); continue; }
+      if (/\.(md|docx?|pdf)$/i.test(f.name)) { out.push({ name: f.name, size: f.size, kind: 'doc', label: KIND_LABEL.doc }); continue; }
       const header = await readHeader(f);
       let kind = detectKind(header);
       if (kind === 'unknown' && header.some((h) => /^(unom|унум|унoм|уном)$/i.test(String(h).trim())) &&
