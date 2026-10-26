@@ -218,7 +218,7 @@ class SourcesApi(unittest.TestCase):
 
 
 class FolderResolution(unittest.TestCase):
-    """Папка по умолчанию data/input внутри приложения, запасная — на рабочем столе."""
+    """Папка по умолчанию data/input внутри приложения, запасная - на рабочем столе."""
 
     def test_defaults_point_to_data_input_with_user_names(self):
         cfg = json.loads((ROOT / "config" / "sources.default.json").read_text(encoding="utf-8"))
@@ -239,32 +239,297 @@ class FolderResolution(unittest.TestCase):
             serve.ROOT = app
             folder, ok = serve.resolve_folder("data/input", [str(desk)], ["дома.csv"])
             self.assertTrue(ok)
-            self.assertEqual(Path(folder), desk, "в data/input пусто — берётся запасная папка с файлами")
+            self.assertEqual(Path(folder), desk, "в data/input пусто - берётся запасная папка с файлами")
             (app / "data" / "input" / "дома.csv").write_text("x", encoding="utf-8")
             folder, _ = serve.resolve_folder("data/input", [str(desk)], ["дома.csv"])
-            self.assertEqual(Path(folder), app / "data" / "input", "файлы есть в data/input — она главнее")
+            self.assertEqual(Path(folder), app / "data" / "input", "файлы есть в data/input - она главнее")
             folder, _ = serve.resolve_folder("data/input", [str(desk)], ["нет-такого.csv"])
             self.assertEqual(Path(folder), app / "data" / "input")
 
 
+BM = load("basemap_mod", ROOT / "tools" / "basemap.py")
+
+
+def write_source(path, tiles, leaf_size=None, tile_compression=1):
+    """Синтетический PMTiles v3 в стиле сборок Protomaps: кластеризованный, с дедупликацией и
+    при leaf_size с листовыми каталогами (в т.ч. вложенными)."""
+    data = bytearray()
+    seen = {}
+    entries = []
+    for tid in sorted(tiles):
+        body = tiles[tid]
+        if body not in seen:
+            seen[body] = len(data)
+            data += body
+        off = seen[body]
+        last = entries[-1] if entries else None
+        if last and last.offset == off and last.tile_id + last.run_length == tid:
+            last.run_length += 1
+        else:
+            entries.append(BM.Entry(tid, off, len(body), 1))
+    leaves = bytearray()
+    level = entries
+    if leaf_size:
+        while len(level) > leaf_size:
+            ptrs = []
+            for i in range(0, len(level), leaf_size):
+                chunk = level[i:i + leaf_size]
+                ser = BM.compress(BM.serialize_dir(chunk), 2)
+                ptrs.append(BM.Entry(chunk[0].tile_id, len(leaves), len(ser), 0))
+                leaves += ser
+            level = ptrs
+    root = BM.compress(BM.serialize_dir(level), 2)
+    meta = BM.compress(json.dumps({"name": "synthetic", "vector_layers": []}).encode(), 2)
+    zs = sorted({z for z in range(0, 20) for t in tiles if ((1 << 2 * z) - 1) // 3 <= t < ((1 << 2 * (z + 1)) - 1) // 3})
+    hd = {
+        "root_offset": BM.HEADER_LEN, "root_length": len(root),
+        "metadata_offset": BM.HEADER_LEN + len(root), "metadata_length": len(meta),
+        "leaf_offset": BM.HEADER_LEN + len(root) + len(meta), "leaf_length": len(leaves),
+        "data_offset": BM.HEADER_LEN + len(root) + len(meta) + len(leaves), "data_length": len(data),
+        "addressed_tiles": len(tiles), "tile_entries": len(entries), "tile_contents": len(seen),
+        "clustered": 1, "internal_compression": 2, "tile_compression": tile_compression, "tile_type": 1,
+        "min_zoom": zs[0], "max_zoom": zs[-1], "min_lon": -1800000000, "min_lat": -850000000,
+        "max_lon": 1800000000, "max_lat": 850000000, "center_zoom": 0, "center_lon": 0, "center_lat": 0,
+    }
+    Path(path).write_bytes(BM.pack_header(hd) + root + meta + bytes(leaves) + bytes(data))
+
+
+def synthetic_tiles(maxzoom=12, bbox=(36.0, 54.6, 39.0, 56.6)):
+    """Тайлы вокруг Москвы: уникальные, повторяющиеся («вода») и пропуски."""
+    tiles = {}
+    for z in range(0, maxzoom + 1):
+        x0, y0 = BM.lonlat_to_tile(bbox[0], bbox[3], z)
+        x1, y1 = BM.lonlat_to_tile(bbox[2], bbox[1], z)
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                if z >= 9 and (x + y) % 7 == 0:
+                    continue  # тайла нет в сборке
+                body = b"water" if z >= 10 and x % 5 == 0 else ("%d/%d/%d|" % (z, x, y)).encode() * (1 + (x * y) % 9)
+                tiles[BM.zxy_to_tileid(z, x, y)] = body
+    return tiles
+
+
+def tiles_in(bbox, z):
+    x0, y0 = BM.lonlat_to_tile(bbox[0], bbox[3], z)
+    x1, y1 = BM.lonlat_to_tile(bbox[2], bbox[1], z)
+    return [(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)]
+
+
+def mvt(name):
+    """Минимальный векторный тайл (MVT) с одним пустым слоем: его без ошибок читает protomaps-leaflet."""
+    def varint(v):
+        out = bytearray()
+        BM.write_varint(out, v)
+        return bytes(out)
+    nb = name.encode()
+    layer = b"\x78\x02" + b"\x0a" + varint(len(nb)) + nb + b"\x28" + varint(4096)
+    return b"\x1a" + varint(len(layer)) + layer
+
+
+def write_e2e_source(path):
+    """Источник для сквозного теста: печатает контрольные тайлы для проверки читателем PMTiles в браузере."""
+    import base64
+    tiles = {}
+    for z in range(0, 12):
+        for x, y in tiles_in((36.0, 54.6, 39.0, 56.6), z):
+            tiles[BM.zxy_to_tileid(z, x, y)] = mvt("t%d_%d_%d" % (z, x, y))
+    write_source(path, tiles, leaf_size=64)
+    samples = []
+    for z in (0, 6, 9, 11):
+        cand = tiles_in(BM.MOSCOW_BBOX, z)
+        for x, y in cand[::max(1, len(cand) // 3)][:3]:
+            samples.append([z, x, y, base64.b64encode(tiles[BM.zxy_to_tileid(z, x, y)]).decode()])
+    x, y = BM.lonlat_to_tile(36.1, 56.5, 11)
+    samples.append([11, x, y, None])  # вне Москвы: в вырезку не попадает
+    print(json.dumps(samples))
+
+
 class Basemap(unittest.TestCase):
-    def setUp(self):
-        self.gb = load("get_basemap", ROOT / "tools" / "get_basemap.py")
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name)
+        cls.tiles = synthetic_tiles()
+        cls.src = cls.dir / "planet.pmtiles"
+        write_source(cls.src, cls.tiles, leaf_size=40)  # корень → листья листьев → листья
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_tile_ids_match_spec(self):
+        # Контрольные значения из спецификации PMTiles v3
+        self.assertEqual([BM.zxy_to_tileid(*t) for t in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0), (2, 0, 0)]],
+                         [0, 1, 2, 3, 4, 5])
+        self.assertEqual(BM.zxy_to_tileid(3, 7, 0), 84)
+        self.assertEqual(BM.zxy_to_tileid(20, 0, 0), 366503875925)
+        ids = {BM.zxy_to_tileid(4, x, y) for x in range(16) for y in range(16)}
+        self.assertEqual(ids, set(range(85, 85 + 256)))  # биекция внутри уровня
+
+    def test_directory_roundtrip(self):
+        es = [BM.Entry(5, 0, 10, 1), BM.Entry(6, 10, 7, 3), BM.Entry(20, 0, 10, 1), BM.Entry(300000, 17, 1, 0)]
+        back = BM.deserialize_dir(BM.serialize_dir(es))
+        self.assertEqual([(e.tile_id, e.offset, e.length, e.run_length) for e in back],
+                         [(e.tile_id, e.offset, e.length, e.run_length) for e in es])
+
+    def check_extract(self, out, maxzoom):
+        hd = BM.parse_header(out.read_bytes()[:BM.HEADER_LEN])
+        self.assertEqual((hd["min_zoom"], hd["max_zoom"]), (0, maxzoom))
+        n = 0
+        for z in range(0, maxzoom + 1):
+            for x, y in tiles_in(BM.MOSCOW_BBOX, z):
+                want = self.tiles.get(BM.zxy_to_tileid(z, x, y))
+                self.assertEqual(BM.read_tile(str(out), z, x, y), want, (z, x, y))
+                n += want is not None
+        self.assertEqual(hd["addressed_tiles"], n)
+        # за пределами Москвы и глубже maxzoom тайлов нет
+        x0, y0 = BM.lonlat_to_tile(36.1, 56.5, maxzoom)
+        self.assertIsNone(BM.read_tile(str(out), maxzoom, x0, y0))
+        x, y = BM.lonlat_to_tile(37.6, 55.75, maxzoom + 1)
+        self.assertIsNone(BM.read_tile(str(out), maxzoom + 1, x, y))
+        self.assertLess(out.stat().st_size, self.src.stat().st_size)
+
+    def test_extract_from_file_with_nested_leaves(self):
+        out = self.dir / "a" / "moscow.pmtiles"
+        info = BM.extract(str(self.src), out=out, maxzoom=11)
+        self.check_extract(out, 11)
+        self.assertEqual(json.loads(BM.meta_path(out).read_text(encoding="utf-8"))["tiles"], info["tiles"])
+        self.assertFalse(out.with_name(out.name + ".download").exists())
+
+    def test_output_with_leaf_directories(self):
+        out = self.dir / "b" / "moscow.pmtiles"
+        old = BM.ROOT_LIMIT
+        BM.ROOT_LIMIT = BM.HEADER_LEN + 200  # заставить писать листовые каталоги
+        try:
+            BM.extract(str(self.src), out=out, maxzoom=12)
+        finally:
+            BM.ROOT_LIMIT = old
+        self.assertGreater(BM.parse_header(out.read_bytes()[:BM.HEADER_LEN])["leaf_length"], 0)
+        self.check_extract(out, 12)
+
+    def test_cancel_keeps_previous_map(self):
+        out = self.dir / "c" / "moscow.pmtiles"
+        out.parent.mkdir()
+        out.write_bytes(b"old map")
+        progress = BM.Progress()
+
+        class Slow(BM.FileSource):
+            calls = 0
+
+            def read(s, offset, length):
+                Slow.calls += 1
+                if Slow.calls > 3:
+                    progress.cancel.set()
+                return super().read(offset, length)
+        orig = BM.open_source
+        BM.open_source = lambda src: Slow(src)
+        try:
+            with self.assertRaises(BM.Cancelled):
+                BM.extract(str(self.src), out=out, maxzoom=12, progress=progress, workers=1)
+        finally:
+            BM.open_source = orig
+        self.assertEqual(out.read_bytes(), b"old map")
+        self.assertEqual(sorted(p.name for p in out.parent.iterdir()), ["moscow.pmtiles"])
 
     def test_latest_build_probes_backwards(self):
         seen = []
 
         def probe(d):
             seen.append(d)
-            return d == "20261023"
-        self.assertEqual(self.gb.latest_build(dt.date(2026, 10, 26), probe=probe), "20261023")
-        self.assertEqual(seen, ["20261025", "20261024", "20261023"])
-        self.assertIsNone(self.gb.latest_build(dt.date(2026, 10, 26), probe=lambda d: False))
+            return d == "20261024"
+        self.assertEqual(BM.latest_build(dt.date(2026, 10, 26), probe=probe), "20261024")
+        self.assertEqual(seen, ["20261026", "20261025", "20261024"])
+        self.assertIsNone(BM.latest_build(dt.date(2026, 10, 26), probe=lambda d: False))
 
-    def test_extract_command(self):
-        cmd = self.gb.extract_command("pmtiles", "20261025", Path("out.pmtiles"), 15)
-        self.assertEqual(cmd, ["pmtiles", "extract", "https://build.protomaps.com/20261025.pmtiles", "out.pmtiles",
-                               "--bbox=36.80,55.13,37.97,56.03", "--maxzoom=15"])
+
+class BasemapHttp(unittest.TestCase):
+    """Загрузка по HTTP Range (как с build.protomaps.com) и API serve.py для кнопки в приложении."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name)
+        cls.tiles = synthetic_tiles(maxzoom=11)
+        write_source(cls.dir / "planet.pmtiles", cls.tiles, leaf_size=64)
+        cls.serve = load("serve_basemap", ROOT / "serve.py")
+        folder = str(cls.dir)
+
+        class Files(cls.serve.Handler):
+            def __init__(self, *a, **kw):
+                http.server.SimpleHTTPRequestHandler.__init__(self, *a, directory=folder, **kw)
+
+        class NoRange(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, directory=folder, **kw)
+
+            def send_head(self):  # отвечает 200 и целым файлом, Range игнорируется
+                self.headers.replace_header("Range", "") if "Range" in self.headers else None
+                return super().send_head()
+
+            def log_message(self, *a):
+                pass
+        cls.files = cls.serve.Server(("127.0.0.1", 0), Files)
+        cls.norange = cls.serve.Server(("127.0.0.1", 0), NoRange)
+        cls.app = cls.serve.Server(("127.0.0.1", 0), cls.serve.Handler)
+        cls.serve.BASEMAP_FILE = cls.dir / "local" / "moscow.pmtiles"
+        for srv in (cls.files, cls.norange, cls.app):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        cls.src_url = "http://127.0.0.1:%d/planet.pmtiles" % cls.files.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        for srv in (cls.files, cls.norange, cls.app):
+            srv.shutdown()
+            srv.server_close()
+        cls.tmp.cleanup()
+
+    def api(self, path, data=None):
+        port = self.app.server_address[1]
+        body = json.dumps(data).encode() if data is not None else None
+        r = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=body, headers={
+            "Host": "localhost:%d" % port, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_extract_over_http(self):
+        out = self.dir / "http" / "moscow.pmtiles"
+        BM.extract(self.src_url, out=out, maxzoom=11)
+        for z in (5, 11):
+            for x, y in tiles_in(BM.MOSCOW_BBOX, z):
+                self.assertEqual(BM.read_tile(str(out), z, x, y), self.tiles.get(BM.zxy_to_tileid(z, x, y)))
+
+    def test_server_without_range_is_rejected(self):
+        url = "http://127.0.0.1:%d/planet.pmtiles" % self.norange.server_address[1]
+        with self.assertRaises(BM.BasemapError) as cm:
+            BM.extract(url, out=self.dir / "nr" / "moscow.pmtiles", maxzoom=11)
+        self.assertIn("частичную загрузку", str(cm.exception))
+
+    def test_api_download_and_update(self):
+        st, body = self.api("/api/basemap")
+        self.assertEqual(st, 200)
+        self.assertFalse(body["exists"])
+        self.assertEqual(body["job"]["state"], "idle")
+        for attempt in range(2):  # первая загрузка и обновление поверх существующей карты
+            st, body = self.api("/api/basemap/download", {"source": self.src_url, "maxzoom": 11})
+            self.assertEqual(st, 202, body)
+            for _ in range(200):
+                st, body = self.api("/api/basemap")
+                if body["job"]["state"] != "running":
+                    break
+                threading.Event().wait(0.05)
+            self.assertEqual(body["job"]["state"], "done", body["job"])
+            self.assertTrue(body["exists"])
+            self.assertEqual(body["meta"]["maxzoom"], 11)
+        self.assertEqual(BM.read_tile(str(self.serve.BASEMAP_FILE), 0, 0, 0), self.tiles[0])
+
+    def test_api_rejects_non_http_source(self):
+        st, body = self.api("/api/basemap/download", {"source": "C:/Windows/win.ini"})
+        self.assertEqual(st, 400)
+        st, body = self.api("/api/basemap/cancel", {})
+        self.assertEqual(st, 200)
 
 
 if __name__ == "__main__":

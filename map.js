@@ -1,21 +1,22 @@
 // Карта (Leaflet): подложки, хороплет округов/районов, дома с геопозицией, контуры зданий, зоны подъездов,
 // тепловой слой заявок (Leaflet.heat) и инструменты ручной разметки (Leaflet-Geoman).
-// На карту попадают ТОЛЬКО дома с сохранённой геопозицией — без случайных или «примерных» точек.
+// На карту попадают ТОЛЬКО дома с сохранённой геопозицией - без случайных или «примерных» точек.
 
-import { h, clear, fmt, icon, STATUS } from './ui.js';
+import { h, clear, fmt, NA, icon, STATUS } from './ui.js';
 import { COV, COV_LABEL, heatPoints, REQ_METRICS, QUARTERS } from './analytics.js';
 import { okrugByCode } from './core/okrugs.js';
 import { seqColorResolved } from './charts.js';
+import { basemapState, basemapShort, onBasemap, startBasemapDownload } from './basemap.js';
 
 const L = window.L;
 const MOSCOW = [55.751, 37.618];
 const PMTILES_URL = 'data/local/moscow.pmtiles';
 
 export const BASEMAPS = {
-  pmtiles: { label: 'Офлайн OSM (data/local/moscow.pmtiles)', offline: true },
+  pmtiles: { label: 'Офлайн-карта (OSM)', offline: true },
   carto: { label: 'CARTO (онлайн, по теме)', url: 'https://{s}.basemaps.cartocdn.com/{style}/{z}/{x}/{y}{r}.png', sub: 'abcd', max: 20, attr: '© участники <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/attributions">CARTO</a>' },
   osm: { label: 'OpenStreetMap (онлайн)', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', max: 19, attr: '© участники <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' },
-  dgis: { label: '2ГИС (онлайн; условия — у 2ГИС)', url: 'https://tile{s}.maps.2gis.com/tiles?x={x}&y={y}&z={z}', sub: '0123', max: 18, attr: '© <a href="https://2gis.ru">2ГИС</a>' },
+  dgis: { label: '2ГИС (онлайн)', url: 'https://tile{s}.maps.2gis.com/tiles?x={x}&y={y}&z={z}', sub: '0123', max: 18, attr: '© <a href="https://2gis.ru">2ГИС</a>' },
   none: { label: 'Без подложки' },
 };
 
@@ -40,6 +41,7 @@ export class MapView {
     this.layerOn = { okrug: true, area: false, houses: true, buildings: true, zones: true, excluded: false };
     this.pmtiles = { available: false, rangeOk: false, checked: false };
     try { this.basemapId = localStorage.getItem('mca-basemap') || ''; } catch (_) { this.basemapId = ''; }
+    onBasemap(() => this._renderControls());
   }
 
   mount(parent) {
@@ -79,10 +81,17 @@ export class MapView {
       const head = await fetch(PMTILES_URL, { method: 'HEAD', cache: 'no-store' });
       if (!head.ok) { this.pmtiles = { available: false, rangeOk: false, checked: true }; return; }
       const rangeOk = (head.headers.get('accept-ranges') || '').includes('bytes');
-      this.pmtiles = { available: true, rangeOk, checked: true, size: Number(head.headers.get('content-length')) || 0 };
+      const version = head.headers.get('last-modified') || head.headers.get('content-length') || '';
+      this.pmtiles = { available: true, rangeOk, checked: true, version, size: Number(head.headers.get('content-length')) || 0 };
     } catch (_) {
       this.pmtiles = { available: false, rangeOk: false, checked: true };
     }
+  }
+
+  /** После скачивания или обновления карты: перечитать файл (новый адрес сбрасывает кэш браузера). */
+  async reloadOffline() {
+    await this.checkPmtiles();
+    if (this.map) this.applyBasemap('pmtiles');
   }
 
   get isDark() {
@@ -100,7 +109,7 @@ export class MapView {
     const def = BASEMAPS[use];
     if (use === 'pmtiles' && window.protomapsL) {
       this.base = window.protomapsL.leafletLayer({
-        url: PMTILES_URL, flavor: this.isDark ? 'dark' : 'light', lang: 'ru',
+        url: `${PMTILES_URL}?v=${encodeURIComponent(this.pmtiles.version || '')}`, flavor: this.isDark ? 'dark' : 'light', lang: 'ru',
         attribution: '© участники <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, <a href="https://protomaps.com">Protomaps</a>',
       });
     } else if (def && def.url) {
@@ -212,7 +221,7 @@ export class MapView {
         L.geoJSON(z.polygon, {
           renderer: this.renderer,
           style: { color: c.accent, weight: 1.5, dashArray: z.accuracy === 'verified' ? null : '5 4', fillColor: c.accent, fillOpacity: 0.12 },
-        }).bindTooltip(`Подъезд ${z.entrance_number || '—'} · ${z.accuracy === 'verified' ? 'проверенная зона' : 'условная зона'}`, { sticky: true })
+        }).bindTooltip(`Подъезд ${z.entrance_number || NA}, ${z.accuracy === 'verified' ? 'проверенная зона' : 'условная зона'}`, { sticky: true })
           .on('click', () => this.cb.onHouse(z.u)).addTo(this.groups.zones);
       }
     }
@@ -234,7 +243,7 @@ export class MapView {
     this.heat = L.heatLayer(res.pts.map((p) => [p.lat, p.lon, w(p.v)]), {
       radius: heat.radius || 24, blur: 18, maxZoom: 15, max: 1, minOpacity: 0.25, gradient: HEAT_GRADIENT,
     }).addTo(this.map);
-    // Невидимые маркеры поверх тепла — чтобы клик открывал карточку с исходными числами
+    // Невидимые маркеры поверх тепла - чтобы клик открывал карточку с исходными числами
     for (const p of res.pts) {
       L.circleMarker([p.lat, p.lon], { renderer: this.renderer, radius: 7, opacity: 0, fillOpacity: 0 })
         .bindTooltip(() => {
@@ -266,7 +275,7 @@ export class MapView {
       el.append(h('div', { class: 'lg-row' }, h('i', { class: 'sw', style: { background: `var(--st-${k === 'full' ? 'good' : k === 'partial' ? 'serious' : k === 'none' ? 'critical' : k === 'na' ? 'unknown' : 'excluded'})` } }),
         icon(STATUS[k].icon, 14), COV_LABEL[k], h('span', { class: 'n' }, fmt.int(counts[k] || 0))));
     }
-    el.append(h('div', { class: 'lg-foot' }, 'Найденная настройка обслуживания в ЕДЦ — не подтверждённое подключение. «Нет привязки» ≠ «отключён». На карте только дома с сохранённой геопозицией.'));
+    el.append(h('div', { class: 'lg-foot' }, 'Найденная настройка обслуживания в ЕДЦ не означает подтверждённое подключение, а «нет привязки» не означает «отключён». На карте только дома с сохранённой геопозицией.'));
   }
 
   // ---------- переключатели ----------
@@ -274,14 +283,19 @@ export class MapView {
     if (!this.controls) return;
     clear(this.controls);
     const pm = this.pmtiles;
+    const bm = basemapState();
+    const offlineHint = !bm.api || (pm.available && bm.job.state !== 'running') ? null
+      : bm.job.state === 'running' ? h('div', { class: 'small muted', style: { marginTop: '8px' } }, `Офлайн-карта: ${basemapShort(bm)}`)
+        : h('button', { class: 'btn btn-sm', style: { marginTop: '8px', width: '100%', justifyContent: 'center' }, onclick: () => startBasemapDownload() }, icon('download', 14), 'Скачать карту Москвы');
     const base = h('div', { class: 'map-panel' },
       h('div', { class: 'ttl' }, 'Подложка'),
       h('select', { 'aria-label': 'Подложка карты', onchange: (e) => this.applyBasemap(e.target.value) },
         Object.entries(BASEMAPS).map(([id, b]) => h('option', {
           value: id, selected: id === this.activeBasemap, disabled: id === 'pmtiles' && !(pm.available && pm.rangeOk),
-        }, id === 'pmtiles' && !pm.available ? `${b.label} — файл не найден` : id === 'pmtiles' && !pm.rangeOk ? `${b.label} — нужен serve.py` : b.label))),
+        }, id === 'pmtiles' && !pm.available ? `${b.label} (не скачана)` : id === 'pmtiles' && !pm.rangeOk ? `${b.label} (нужен serve.py)` : b.label))),
       this.tileErrors && this.activeBasemap !== 'pmtiles' && this.activeBasemap !== 'none'
-        ? h('div', { class: 'muted small', style: { marginTop: '6px', maxWidth: '230px' } }, 'Тайлы не загружаются (нет интернета?). Офлайн-подложка: см. README → «Офлайн-карта».') : null);
+        ? h('div', { class: 'muted small', style: { marginTop: '6px' } }, 'Онлайн-подложка не загружается: нет доступа в интернет.') : null,
+      offlineHint);
     this.controls.append(base);
     if (this.mode !== 'heat') {
       const t = (key, label, disabled) => h('label', null, h('input', {

@@ -1,7 +1,7 @@
 // Web Worker импорта и тяжёлых вычислений. Запускается как module worker.
 // Протокол: main → {id, cmd, ...}; worker → {id, type: 'progress' | 'preview' | 'result' | 'error', ...}.
 // Импорт пишет новый снимок «рядом» (status=staging) и переключает активный снимок только после
-// подтверждения пользователя — так обновление атомарно, а отмена ничего не портит.
+// подтверждения пользователя - так обновление атомарно, а отмена ничего не портит.
 
 import {
   openDb, tx, get, put, getAll, putMany, scan, snapRange, deleteRange, getActive, setMeta, clear, count,
@@ -66,7 +66,7 @@ async function init() {
   await openDb();
   const snaps = await getAll('snapshots');
   const active = await getActive();
-  // Прерванные импорты и не удалённые старые снимки — освобождаем место.
+  // Прерванные импорты и не удалённые старые снимки - освобождаем место.
   for (const sn of snaps) {
     const isActive = sn.id === active.mji || sn.id === active.edc;
     if (isActive) continue;
@@ -222,7 +222,7 @@ async function importMji(msg, post) {
           s.mji_gone.put({ u, record: p, missingSince: snapId, missingSinceDate: dataDate || preview.suggestedDate });
         }
         for (const h of houses) s.mji_gone.delete(h.u);
-        // Геометрию при смене адреса не двигаем — ставим отметку «требует проверки».
+        // Геометрию при смене адреса не двигаем - ставим отметку «требует проверки».
         for (const u of diff.addressChanged) {
           const g = await reqP(s.geo.get(u));
           if (g) s.geo.put({ ...g, review: 'address_changed', reviewNote: 'Адрес в МЖИ изменился после геопривязки' });
@@ -324,7 +324,7 @@ async function importEdc(msg, post) {
       if (hk) hk.set(rec.r, [rec.ro, rec.i, rec.ur]);
       batch.push(packHouse(rec));
     };
-    // Ключи адреса по дому — нужны для пересчёта подъездов в режиме «только заявки»
+    // Ключи адреса по дому - нужны для пересчёта подъездов в режиме «только заявки»
     const hk = mode === 'requests' ? new Map() : null;
 
     // 2) Дома
@@ -397,7 +397,7 @@ async function importEdc(msg, post) {
       entrRows++;
     };
     // SQL № 3 отсортирован по адресу: подъезды дома идут подряд в пределах одного текста адреса.
-    // Группы сбрасываются при смене адреса; если дом встретился снова позже — дозапись в конце (late).
+    // Группы сбрасываются при смене адреса; если дом встретился снова позже - дозапись в конце (late).
     let groups = new Map();
     let curAddr = null;
     const flushed = new Set();

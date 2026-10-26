@@ -57,7 +57,7 @@ test('однобайтовые строки: значение не меняет�
   assert.equal(ob('Жилое'), 'Жилое');
 });
 
-test('размер записи дома после упаковки — не больше ~60% исходного', () => {
+test('размер записи дома после упаковки - не больше ~60% исходного', () => {
   const { houses } = mergeRaw();
   const raw = houses.reduce((s, h) => s + size({ s: 'edc-x', ...h }), 0);
   const packed = houses.reduce((s, h) => s + size(packHouse({ s: 'edc-x', ...h })), 0);

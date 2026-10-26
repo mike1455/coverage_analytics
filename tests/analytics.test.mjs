@@ -20,7 +20,7 @@ test('правило выбора записи ЕДЦ: единственная 
   assert.equal(pickCandidate([b, edc({ r: 'e', ac: false })]).pick, null);
 });
 
-test('классификация: неизвестно ≠ нет, неактуальный/нежилой — отдельный слой', () => {
+test('классификация: неизвестно ≠ нет, неактуальный/нежилой - отдельный слой', () => {
   assert.equal(classify(edc({ r: 'x', et: 3, el: 3 })).cov, 'full');
   assert.equal(classify(edc({ r: 'x', et: 3, el: 1 })).cov, 'partial');
   assert.equal(classify(edc({ r: 'x', et: 3, el: 0 })).cov, 'none');
@@ -42,7 +42,7 @@ test('сопоставление: УНОМ, конфликт, ФИАС толь�
   j.consider(edc({ r: 'e5', un: '', fi: 'FD' }));        // повторяющийся в МЖИ ФИАС не используется
   const { rows, edcStats } = j.finish();
   const by = Object.fromEntries(rows.map((r) => [r.u, r]));
-  assert.equal(by['1'].m, 'conflict', 'у УНОМ 1 две записи (e1 и e4) — обе актуальные жилые');
+  assert.equal(by['1'].m, 'conflict', 'у УНОМ 1 две записи (e1 и e4) - обе актуальные жилые');
   assert.equal(by['2'].m, 'conflict');
   assert.deepEqual(by['2'].cands.sort(), ['e2a', 'e2b']);
   assert.equal(by['3'].m, 'matched');

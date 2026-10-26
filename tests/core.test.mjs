@@ -12,7 +12,7 @@ import { parseMji } from '../core/mji.js';
 import { detectKind, HOUSES_SPEC, ENTRANCES_SPEC, HOUSES_REQUIRED, ENTRANCES_REQUIRED, houseReader } from '../core/edc.js';
 import { normOkrug, areaKey } from '../core/okrugs.js';
 
-// Заголовки ровно как в «Примерах выгрузки» (S1) — с усечением PostgreSQL до 63 байт.
+// Заголовки ровно как в «Примерах выгрузки» (S1) - с усечением PostgreSQL до 63 байт.
 const HOUSES_HDR = readFileSync(join(ROOT, 'data/templates/01_дома.csv'), 'utf8').split(/\r?\n/)[0];
 const ENTR_HDR = readFileSync(join(ROOT, 'data/templates/02_подъезды.csv'), 'utf8').split(/\r?\n/)[0];
 const REQ_HDR = readFileSync(join(ROOT, 'data/templates/03_заявки_2026.csv'), 'utf8').split(/\r?\n/)[0];
@@ -44,7 +44,7 @@ test('CSV: разделитель и кодировка определяются
   assert.equal(detectEncoding(new Uint8Array([0xc0, 0xe4, 0xf0, 0xe5, 0xf1])), 'windows-1251'); // «Адрес» в cp1251
 });
 
-test('CSV: незакрытая кавычка — понятная ошибка', () => {
+test('CSV: незакрытая кавычка - понятная ошибка', () => {
   assert.throws(() => parseCsvText('a,b\n"x,1\n'), /незакрытая кавычка/);
 });
 
@@ -82,7 +82,7 @@ test('МЖИ: нормализация, проверки качества, ду�
   assert.equal(houses[2].fiasValid, false);
 });
 
-test('МЖИ: повторяющийся UNOM — критическая ошибка', () => {
+test('МЖИ: повторяющийся UNOM - критическая ошибка', () => {
   const h = ['Округ', 'Район', 'Наименование/адрес', 'UNOM'];
   const { report } = parseMji(h, [['ЦАО', 'А', 'x', '1'], ['ЦАО', 'А', 'y', '001']]);
   assert.equal(report.errors.length, 1);
@@ -133,7 +133,7 @@ test('тип файла определяется по заголовкам, не
   assert.equal(detectKind(['Адрес', 'УНОМ', 'ФИАС', 'ID адреса', 'Тип дома', 'Есть привязка платного дефекта', 'Количество платных дефектов', 'ID платных дефектов', 'Количество организаций', 'ID обслуживающих организаций']), 'sql6');
 });
 
-test('CSV домов: лишние колонки в строке и привязок больше, чем подъездов — ошибка', () => {
+test('CSV домов: лишние колонки в строке и привязок больше, чем подъездов - ошибка', () => {
   const h = parseCsvText(HOUSES_HDR).header;
   const rd = houseReader(h, false);
   const row = h.map(() => '');

@@ -1,8 +1,8 @@
-// Аналитика: сопоставление МЖИ ↔ ЕДЦ, классификация покрытия по привязкам ЕДЦ, KPI и рейтинги.
-// Чистые функции без DOM — используются в Web Worker, в интерфейсе и в node-тестах.
+// Аналитика: сопоставление МЖИ и ЕДЦ, классификация покрытия по привязкам ЕДЦ, KPI и рейтинги.
+// Чистые функции без DOM - используются в Web Worker, в интерфейсе и в node-тестах.
 //
 // Ключевые правила (ТЗ §3):
-//  • «Покрытие по привязкам ЕДЦ» ≠ «подтверждённое подключение». Флага подключения нет — метрика прокси.
+//  • «Покрытие по привязкам ЕДЦ» ≠ «подтверждённое подключение». Флага подключения нет - метрика прокси.
 //  • Оценённый дом = однозначно сопоставлен с ЕДЦ-записью, actual=true, house_type='Жилое', подъездов > 0.
 //  • Заявки по округу = сумма агрегатов уровня «Дом». Уровни «Дом» и «Подъезд» никогда не складываются.
 //  • Неизвестно ≠ нет: несопоставленные/конфликтные/без подъездов дома не считаются «неподключёнными».
@@ -10,7 +10,7 @@
 import { Q } from './core/edc.js';
 import { OKRUG_CODES, NO_OKRUG } from './core/okrugs.js';
 
-export const MIN_SAMPLE = 30; // меньше — «малая выборка», место в рейтинге не присваивается
+export const MIN_SAMPLE = 30; // меньше - «малая выборка», место в рейтинге не присваивается
 
 export const COV = { full: 'full', partial: 'partial', none: 'none', na: 'na', excluded: 'excluded' };
 
@@ -29,10 +29,10 @@ export const NA_REASON = {
   conflict: 'Неоднозначное соответствие (несколько записей ЕДЦ)',
   override_none: 'Вручную: соответствия в ЕДЦ нет',
   override_missing: 'Ручное соответствие: записи нет в текущем снимке ЕДЦ',
-  edc_not_last: 'Запись ЕДЦ не последняя версия (is_last ≠ true)',
+  edc_not_last: 'Запись ЕДЦ не последняя версия (is_last не true)',
   edc_not_actual: 'Объект ЕДЦ неактуален (actual = false)',
   edc_actual_unknown: 'Актуальность объекта ЕДЦ неизвестна',
-  edc_not_residential: 'Тип дома в ЕДЦ — «Нежилое»',
+  edc_not_residential: 'Тип дома в ЕДЦ «Нежилое»',
   edc_type_unknown: 'Тип дома в ЕДЦ не «Жилое» (не установлен / иной)',
   no_entrances: 'В ЕДЦ нет записей о подъездах',
 };
@@ -67,9 +67,9 @@ export function pickCandidate(cands) {
   if (act.length > 1) {
     const res = act.filter((c) => c.htn === 'жилое');
     if (res.length === 1) return { pick: res[0], rule: `единственная актуальная жилая из ${cands.length} записей` };
-    return { pick: null, rule: `${act.length} актуальных записей ЕДЦ — требуется ручной выбор` };
+    return { pick: null, rule: `${act.length} актуальных записей ЕДЦ, нужен ручной выбор` };
   }
-  return { pick: null, rule: `${cands.length} записей ЕДЦ, ни одна не актуальна — требуется ручной выбор` };
+  return { pick: null, rule: `${cands.length} записей ЕДЦ, ни одна не актуальна, нужен ручной выбор` };
 }
 
 /** Классификация покрытия для сопоставленного дома. */
@@ -86,7 +86,7 @@ export function classify(e) {
 }
 
 /**
- * Сопоставление МЖИ ↔ ЕДЦ. Использование:
+ * Сопоставление МЖИ и ЕДЦ. Использование:
  *   const j = new Joiner(mjiHouses); for (const e of edc) j.consider(e); const res = j.finish(overrides, overrideRecs);
  */
 export class Joiner {
@@ -144,8 +144,8 @@ export class Joiner {
   }
 
   /**
-   * @param {Map<string,{r:string|null}>} overrides — UNOM → ручной выбор (r=null — «нет соответствия»)
-   * @param {Map<string,object>} overrideRecs — r → запись ЕДЦ для ручных выборов
+   * @param {Map<string,{r:string|null}>} overrides - UNOM → ручной выбор (r=null - «нет соответствия»)
+   * @param {Map<string,object>} overrideRecs - r → запись ЕДЦ для ручных выборов
    */
   finish(overrides = new Map(), overrideRecs = new Map()) {
     const rows = [];
@@ -245,7 +245,7 @@ export const REQ_METRICS = {
   open: { label: 'Без даты закрытия', idx: Q.open, quarters: false },
   critical: { label: 'Критические', idx: Q.critical, quarters: false },
 };
-export const QUARTERS = { '': 'Весь имеющийся 2026', q1: 'I квартал', q2: 'II квартал', q3: 'III квартал', q4: 'IV квартал (частичный)' };
+export const QUARTERS = { '': 'Весь 2026 год', q1: 'I квартал', q2: 'II квартал', q3: 'III квартал', q4: 'IV квартал (частичный)' };
 
 /** Значение заявок домового уровня для строки. Квартал допустим только для «всех заявок». */
 export function reqValue(row, metric = 'total', quarter = '') {
@@ -330,7 +330,7 @@ export const RANK_METRICS = {
   fullShare: {
     label: '% домов с полной привязкой подъездов', short: '% полностью покрытых', pct: true, needsEdc: true,
     num: (k) => k.full, den: (k) => k.evaluated, numLabel: 'полностью покрыто', denLabel: 'оценено домов',
-    note: 'По найденным привязкам ЕДЦ, не подтверждённое подключение. Знаменатель — оценённые дома.',
+    note: 'По найденным привязкам ЕДЦ, не подтверждённое подключение. Знаменатель: оценённые дома.',
   },
   entrShare: {
     label: '% подъездов с найденной привязкой', short: '% подъездов с привязкой', pct: true, needsEdc: true,
@@ -343,7 +343,7 @@ export const RANK_METRICS = {
   },
   requestsPer1000: {
     label: 'Заявок 2026 на 1 000 сопоставленных МКД', short: 'Заявок на 1 000 МКД', pct: false, needsEdc: true,
-    note: 'Знаменатель — МКД МЖИ, сопоставленные с ЕДЦ.',
+    note: 'Знаменатель: МКД МЖИ, сопоставленные с ЕДЦ.',
   },
   matchRate: {
     label: '% МКД МЖИ, сопоставленных с ЕДЦ', short: '% сопоставления', pct: true, needsEdc: true,

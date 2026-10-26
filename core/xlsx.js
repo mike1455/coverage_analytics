@@ -1,6 +1,6 @@
 // Минимальный читатель XLSX (первый лист) без SheetJS: zip через fflate + разбор XML регулярными выражениями.
 // Достаточно для выгрузок DBeaver/Excel: shared strings, inline strings, числа, булевы.
-// Все значения возвращаются строками — идентификаторы (UNOM, ФИАС) не превращаются в числа с потерями.
+// Все значения возвращаются строками - идентификаторы (UNOM, ФИАС) не превращаются в числа с потерями.
 
 import { unzipSync, strFromU8 } from '../vendor/fflate/fflate.esm.js';
 
@@ -20,7 +20,7 @@ function decodeXml(s) {
 }
 
 function textOf(xmlFragment) {
-  // Все <t>…</t> кроме фонетических <rPh>
+  // Все <t>...</t> кроме фонетических <rPh>
   const noPh = xmlFragment.replace(/<rPh\b[\s\S]*?<\/rPh>/g, '');
   let out = '';
   const re = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>|<t(?:\s[^>]*)?\/>/g;

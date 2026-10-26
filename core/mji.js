@@ -70,7 +70,7 @@ export function parseMji(header, rows) {
     if (f.empty) r.noFias++;
     else if (!f.valid) {
       r.invalidFias++;
-      if (r.invalidFiasExamples.length < 10) r.invalidFiasExamples.push(`${f.raw} (UNOM ${unomRaw || '—'})`);
+      if (r.invalidFiasExamples.length < 10) r.invalidFiasExamples.push(`${f.raw} (UNOM ${unomRaw || '-'})`);
     } else fiasCount.set(f.value, (fiasCount.get(f.value) || 0) + 1);
     if (!h.uk) r.noUk++;
     if (!okrugRaw) r.noOkrug++;
@@ -94,11 +94,11 @@ export function parseMji(header, rows) {
     r.errors.push(`UNOM повторяется в ${dupUnom.length} строках (первичный ключ МЖИ должен быть уникальным). ` +
       `Примеры: ${dupUnom.slice(0, 5).map((d) => `${d.unom} (строки ${d.lines.join(', ')})`).join('; ')}`);
   }
-  if (r.noUnom) r.warnings.push(`${r.noUnom} строк без UNOM — сохраняются, но не участвуют в сопоставлении с ЕДЦ.`);
+  if (r.noUnom) r.warnings.push(`${r.noUnom} строк без UNOM. Они сохраняются, но не участвуют в сопоставлении с ЕДЦ.`);
   if (r.noFias) r.warnings.push(`${r.noFias} строк без ФИАС.`);
   if (r.invalidFias) r.warnings.push(`${r.invalidFias} строк с некорректным ФИАС (не UUID), например: ${r.invalidFiasExamples.slice(0, 4).join('; ')}. Такие значения не используются как ключ.`);
-  if (r.dupFiasValues) r.warnings.push(`${r.dupFiasValues} значений ФИАС повторяются (${r.dupFiasRows} повторных строк) — по ним сопоставление по ФИАС не выполняется.`);
-  if (r.noOkrug) r.warnings.push(`${r.noOkrug} строк без округа — не включаются в рейтинг конкретного округа.`);
+  if (r.dupFiasValues) r.warnings.push(`${r.dupFiasValues} значений ФИАС повторяются (${r.dupFiasRows} повторных строк), по ним сопоставление по ФИАС не выполняется.`);
+  if (r.noOkrug) r.warnings.push(`${r.noOkrug} строк без округа, они не включаются в рейтинг округа.`);
   if (r.unknownOkrug.length) r.warnings.push(`Нераспознанные значения округа: ${r.unknownOkrug.slice(0, 10).join(', ')}.`);
   if (r.noUk) r.warnings.push(`${r.noUk} строк без управляющей организации.`);
   return { houses, report: r };

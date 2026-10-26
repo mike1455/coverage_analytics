@@ -40,29 +40,33 @@ export function clear(el) {
   return el;
 }
 
+/** Подпись для отсутствующего значения */
+export const NA = 'н/д';
+export const na = () => h('span', { class: 'na' }, NA);
+
 const nf = new Intl.NumberFormat('ru-RU');
 const nf1 = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 export const fmt = {
-  int: (n) => (n === null || n === undefined || Number.isNaN(n) ? '—' : nf.format(Math.round(n))),
-  num1: (n) => (n === null || n === undefined || Number.isNaN(n) ? '—' : nf1.format(n)),
+  int: (n) => (n === null || n === undefined || Number.isNaN(n) ? NA : nf.format(Math.round(n))),
+  num1: (n) => (n === null || n === undefined || Number.isNaN(n) ? NA : nf1.format(n)),
   pct: (x, digits = 1) => {
-    if (x === null || x === undefined || Number.isNaN(x)) return '—';
+    if (x === null || x === undefined || Number.isNaN(x)) return NA;
     return new Intl.NumberFormat('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(x * 100) + '%';
   },
   date: (s) => {
-    if (!s) return '—';
+    if (!s) return NA;
     const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
     return m ? `${m[3]}.${m[2]}.${m[1]}` : String(s);
   },
   dateTime: (s) => {
-    if (!s) return '—';
+    if (!s) return NA;
     const d = new Date(s);
     if (Number.isNaN(d.getTime())) return String(s);
     return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
   },
   bytes: (n) => {
-    if (!n && n !== 0) return '—';
+    if (!n && n !== 0) return NA;
     const u = ['Б', 'КБ', 'МБ', 'ГБ'];
     let i = 0; let v = n;
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
@@ -207,9 +211,9 @@ export function copyText(text) {
   if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('Скопировано', 'ok', 1500)).catch(() => {});
 }
 
-/** Строка «ключ — значение» для карточек. */
+/** Строка «ключ - значение» для карточек. */
 export function kv(label, value, opts = {}) {
-  const v = value === null || value === undefined || value === '' ? h('span', { class: 'muted' }, opts.empty || '—') : value;
+  const v = value === null || value === undefined || value === '' ? h('span', { class: 'na' }, opts.empty || NA) : value;
   return h('div', { class: 'kv' }, h('div', { class: 'kv-k' }, label),
     h('div', { class: `kv-v ${opts.mono ? 'mono' : ''}` }, v,
       opts.copy && value ? h('button', { class: 'icon-btn tiny', title: 'Копировать', 'aria-label': 'Копировать', onclick: () => copyText(String(opts.copy === true ? value : opts.copy)) }, icon('copy', 14)) : null));

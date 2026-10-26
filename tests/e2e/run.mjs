@@ -1,12 +1,14 @@
 // Сквозной тест в headless Chromium (Playwright): импорт МЖИ и ЕДЦ через интерфейс, сверка KPI с расчётом в node,
 // повторный импорт идентичного снимка, сохранность геоданных, режим объединённых CSV, обновление только заявок,
-// резервная копия. Данные — СИНТЕТИЧЕСКИЕ (tests/fixtures/synthetic), реальный реестр не нужен.
+// скачивание офлайн-карты кнопкой, резервная копия. Данные СИНТЕТИЧЕСКИЕ (tests/fixtures/synthetic),
+// реальный реестр и интернет не нужны: карта качается с локального сервера с поддержкой Range.
 //
 // Запуск: node tests/e2e/run.mjs   (нужны Python 3 и Playwright с Chromium)
 // Скриншоты: tests/e2e/output/
 import { createRequire } from 'node:module';
-import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync, copyFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -36,10 +38,30 @@ function freePort() {
   return new Promise((res) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 }
 
-async function startServer(port) {
-  const py = process.env.PYTHON || (process.platform === 'win32' ? 'py' : 'python3');
-  const args = process.platform === 'win32' && !process.env.PYTHON ? ['-3', 'serve.py', '--port', String(port), '--no-browser'] : ['serve.py', '--port', String(port), '--no-browser'];
-  const proc = spawn(py, args, { cwd: ROOT, stdio: 'ignore', env: { ...process.env, MCA_SOURCES_CONFIG: SOURCES_CONFIG } });
+const PY = process.env.PYTHON || (process.platform === 'win32' ? 'py' : 'python3');
+const PY_ARGS = process.platform === 'win32' && !process.env.PYTHON ? ['-3'] : [];
+
+// Офлайн-карта: синтетическая «сборка мира» в формате PMTiles и сервер с поддержкой Range вместо build.protomaps.com
+const BASEMAP = join(ROOT, 'data', 'local', 'moscow.pmtiles');
+const BASEMAP_TEST = !existsSync(BASEMAP); // карту пользователя тест не трогает
+let basemapSamples = [];
+function rangeServer(file) {
+  const buf = readFileSync(file);
+  return new Promise((res) => {
+    const srv = http.createServer((req, resp) => {
+      const m = /bytes=(\d+)-(\d+)/.exec(req.headers.range || '');
+      if (!m) { resp.writeHead(200, { 'Content-Length': buf.length }); resp.end(buf); return; }
+      const a = Number(m[1]); const b = Math.min(Number(m[2]), buf.length - 1);
+      resp.writeHead(206, { 'Content-Range': `bytes ${a}-${b}/${buf.length}`, 'Content-Length': b - a + 1 });
+      resp.end(buf.subarray(a, b + 1));
+    });
+    srv.listen(0, '127.0.0.1', () => res(srv));
+  });
+}
+
+async function startServer(port, env = {}) {
+  const args = [...PY_ARGS, 'serve.py', '--port', String(port), '--no-browser'];
+  const proc = spawn(PY, args, { cwd: ROOT, stdio: 'ignore', env: { ...process.env, MCA_SOURCES_CONFIG: SOURCES_CONFIG, ...env } });
   for (let i = 0; i < 50; i++) {
     try { const r = await fetch(`http://127.0.0.1:${port}/index.html`); if (r.ok) return proc; } catch (_) { /* ждём */ }
     await new Promise((r) => setTimeout(r, 200));
@@ -68,7 +90,7 @@ async function uiKpi(page) {
   });
 }
 
-// Playwright молча отбрасывает пути с кириллицей — передаём содержимое файлов с исходными именами.
+// Playwright молча отбрасывает пути с кириллицей - передаём содержимое файлов с исходными именами.
 const payload = (paths) => paths.map((p) => ({ name: p.split(/[\\/]/).pop(), mimeType: 'text/csv', buffer: readFileSync(p) }));
 
 async function importViaWizard(page, files, opts = {}) {
@@ -101,14 +123,17 @@ function prepareSourceFolder() {
   copyFileSync(join(FIX, '02_подъезды.csv'), join(SRC_DIR, USER_NAMES.entrances));
   copyFileSync(join(FIX, '03_заявки_2026.csv'), join(SRC_DIR, USER_NAMES.requests));
   writeFileSync(join(SRC_DIR, 'Запрос № 1. Какие типы домов есть в ЕДЦ (контроль, без экспорта).csv'), '"Тип дома в ЕДЦ (house_type)","Пример адреса"\nЖилое,x\n');
-  // Имя заявок намеренно с ошибкой — тест исправит его в окне
+  // Имя заявок намеренно с ошибкой - тест исправит его в окне
   writeFileSync(SOURCES_CONFIG, JSON.stringify({ folder: SRC_DIR, files: { ...USER_NAMES, requests: 'опечатка.csv', geo: '' } }));
 }
 
 (async () => {
   prepareSourceFolder();
+  const planet = join(SRC_DIR, 'planet.pmtiles');
+  basemapSamples = JSON.parse(execFileSync(PY, [...PY_ARGS, '-c', 'import sys, test_tools as t; t.write_e2e_source(sys.argv[1])', planet], { cwd: join(ROOT, 'tests') }).toString());
+  const tileServer = await rangeServer(planet);
   const port = await freePort();
-  const server = await startServer(port);
+  const server = await startServer(port, { MCA_BASEMAP_SOURCE: `http://127.0.0.1:${tileServer.address().port}/planet.pmtiles` });
   const browser = await chromium.launch();
   const errors = [];
   try {
@@ -125,9 +150,9 @@ function prepareSourceFolder() {
     // 1) МЖИ + три сырых CSV ЕДЦ из «папки с выгрузками»: имена как у DBeaver, одно имя исправляется в окне
     const raw = ['01_дома.csv', '02_подъезды.csv', '03_заявки_2026.csv'].map((f) => join(FIX, f));
     await page.click('text=Загрузить из папки выгрузок');
-    await page.waitForSelector('.modal input[aria-label="SQL № 4 — заявки 2026"]');
+    await page.waitForSelector('.modal input[aria-label="SQL № 4 (заявки 2026)"]');
     assert.equal(await page.locator('.modal .badge.st-none').count(), 1, 'неверное имя файла заявок помечено «не найден»');
-    await page.fill('.modal input[aria-label="SQL № 4 — заявки 2026"]', USER_NAMES.requests);
+    await page.fill('.modal input[aria-label="SQL № 4 (заявки 2026)"]', USER_NAMES.requests);
     await page.click('.modal button:has-text("Сохранить и проверить")');
     await page.waitForFunction(() => document.querySelectorAll('.modal .badge.st-full').length === 5); // папка + 4 файла
     await page.screenshot({ path: join(OUT, '01b_sources.png') });
@@ -154,7 +179,7 @@ function prepareSourceFolder() {
     // Повторное открытие: все четыре файла отмечены как «уже загружен» и не выбраны
     await page.click('.nav-item[data-view="import"]');
     await page.click('#view-import button:has-text("Папка и имена файлов")');
-    await page.waitForSelector('.modal input[aria-label="SQL № 4 — заявки 2026"]');
+    await page.waitForSelector('.modal input[aria-label="SQL № 4 (заявки 2026)"]');
     assert.equal(await page.locator('.modal :text("уже загружен в приложение")').count(), 4);
     assert.equal(await page.locator('.modal input[type=checkbox]:checked').count(), 0);
     await page.click('.modal button:has-text("Закрыть")');
@@ -230,6 +255,32 @@ function prepareSourceFolder() {
     await page.waitForTimeout(500);
     await page.screenshot({ path: join(OUT, '09_import_quality.png'), fullPage: true });
 
+    // 5б) Офлайн-карта: одна кнопка, файл сохраняется в data/local, браузерный читатель PMTiles видит тайлы
+    if (BASEMAP_TEST) {
+      await page.click('.nav-item[data-view="map"]');
+      await page.click('#view-map button:has-text("Скачать карту Москвы")');
+      await page.waitForFunction(() => window.__app.map.activeBasemap === 'pmtiles', null, { timeout: 60000 });
+      const got = await page.evaluate(async (samples) => {
+        const src = new window.protomapsL.PmtilesSource(`data/local/moscow.pmtiles?v=${Date.now()}`, false);
+        const out = [];
+        for (const [z, x, y] of samples) {
+          const t = await src.p.getZxy(z, x, y);
+          out.push(t ? btoa(String.fromCharCode(...new Uint8Array(t.data))) : null);
+        }
+        return out;
+      }, basemapSamples);
+      assert.deepEqual(got, basemapSamples.map((s) => s[3]), 'тайлы вырезки читаются protomaps-leaflet');
+      await page.waitForTimeout(500);
+      await page.screenshot({ path: join(OUT, '03b_map_offline.png') });
+      await page.click('.nav-item[data-view="import"]');
+      await page.waitForSelector('#view-import :text("Карта сохранена на компьютере")');
+      assert.equal(await page.locator('#view-import button:has-text("Обновить карту")').count(), 1);
+      assert.match(await page.evaluate(() => document.querySelector('#nav-status').innerText), /Офлайн-карта/);
+      log(`офлайн-карта скачана кнопкой и читается в браузере (${basemapSamples.length} контрольных тайлов)`);
+    } else {
+      log('офлайн-карта: data/local/moscow.pmtiles уже есть, проверка скачивания пропущена');
+    }
+
     // 6) Полная резервная копия → восстановление
     const restored = await page.evaluate(async () => {
       const a = window.__app;
@@ -243,7 +294,7 @@ function prepareSourceFolder() {
     assert.equal(restored.geo, 6);
     assert.equal(restored.rows, k.mkd);
     assert.deepEqual(await uiKpi(page), k, 'KPI после восстановления из полной копии');
-    log(`резервная копия: ${restored.restored} записей, ${restored.size} байт — восстановлено без потерь`);
+    log(`резервная копия: ${restored.restored} записей, ${restored.size} байт - восстановлено без потерь`);
 
     assert.deepEqual(errors, [], `ошибки в консоли: ${errors.join(' | ')}`);
     log('E2E: все проверки пройдены. Скриншоты:', OUT);
@@ -258,6 +309,8 @@ function prepareSourceFolder() {
   } finally {
     await browser.close();
     server.kill();
+    tileServer.close();
+    if (BASEMAP_TEST) for (const f of [BASEMAP, `${BASEMAP}.json`]) rmSync(f, { force: true });
     rmSync(SRC_DIR, { recursive: true, force: true });
   }
 })().catch((e) => { console.error('E2E ОШИБКА:', e); process.exit(1); });

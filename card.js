@@ -1,6 +1,6 @@
 // Карточка дома (правая панель): МЖИ, сопоставление с ЕДЦ, признаки ЕДЦ, подъезды, заявки 2026, геопривязка.
 
-import { h, clear, fmt, icon, kv, statusBadge, toast, modal, confirmDialog, plural } from './ui.js';
+import { h, clear, fmt, NA, na, icon, kv, statusBadge, toast, modal, confirmDialog, plural } from './ui.js';
 import { MATCH_LABEL, NA_REASON, COV_LABEL, classify } from './analytics.js';
 import { Q, isIdLabel } from './core/edc.js';
 import { nominatimSearch, accuracyOf, centroidOf } from './geo.js';
@@ -20,7 +20,7 @@ export async function openCard(app, u) {
   const head = h('div', { class: 'drawer-head' },
     h('div', { class: 'grow' },
       h('h2', null, row.address || '(адрес не указан)'),
-      h('div', { class: 'crumbs' }, [row.okrug, row.area, `UNOM ${row.ur || '—'}`].filter(Boolean).join(' · ')),
+      h('div', { class: 'crumbs' }, [row.okrug, row.area, `UNOM ${row.ur || NA}`].filter(Boolean).join(', ')),
       h('div', { style: { marginTop: '8px', display: 'flex', gap: '6px', flexWrap: 'wrap' } },
         statusBadge(row.cov, row.cov === 'na' || row.cov === 'excluded' ? `${COV_LABEL[row.cov]}: ${NA_REASON[row.na] || ''}` : null))),
     h('button', { class: 'icon-btn', 'aria-label': 'Закрыть карточку', onclick: closeCard }, icon('close')));
@@ -31,10 +31,10 @@ export async function openCard(app, u) {
   const e = row.e;
   const q = row.q;
   body.append(h('div', { class: 'mini-kpis' },
-    mini(e ? `${fmt.int(e.el)} / ${fmt.int(e.et)}` : '—', 'подъездов с привязкой / всего'),
-    mini(q ? fmt.int(q[Q.total]) : '—', 'заявок 2026 (дом)'),
-    mini(q ? fmt.int(q[Q.open]) : '—', 'без даты закрытия'),
-    mini(q ? fmt.int(q[Q.critical]) : '—', 'критических')));
+    mini(e ? `${fmt.int(e.el)} / ${fmt.int(e.et)}` : NA, 'подъездов с привязкой / всего'),
+    mini(q ? fmt.int(q[Q.total]) : NA, 'заявок 2026 (дом)'),
+    mini(q ? fmt.int(q[Q.open]) : NA, 'без даты закрытия'),
+    mini(q ? fmt.int(q[Q.critical]) : NA, 'критических')));
 
   body.append(matchSection(app, row));
   body.append(sect('Реестр МЖИ', null,
@@ -45,9 +45,9 @@ export async function openCard(app, u) {
     kv('Округ / район', `${row.okrug}${row.area ? ` / ${row.area}` : ''}`),
     kv('Управляющая организация', row.uk)));
 
-  // Полная запись ЕДЦ (признаки, заявки, подъезды) подгружается из worker — в кэше сопоставления только краткая сводка
-  const edcBox = e ? h('div', { class: 'muted small' }, 'Загрузка признаков ЕДЦ…') : null;
-  const entrBox = sect('Подъезды (ЕДЦ)', null, h('div', { class: 'muted small' }, e ? 'Загрузка…' : 'Нет сопоставленной записи ЕДЦ.'));
+  // Полная запись ЕДЦ (признаки, заявки, подъезды) подгружается из worker - в кэше сопоставления только краткая сводка
+  const edcBox = e ? h('div', { class: 'muted small' }, 'Загрузка признаков ЕДЦ...') : null;
+  const entrBox = sect('Подъезды (ЕДЦ)', null, h('div', { class: 'muted small' }, e ? 'Загрузка...' : 'Нет сопоставленной записи ЕДЦ.'));
   const reqBox = q ? h('div') : null;
   body.append(...[edcBox, entrBox, reqBox].filter(Boolean));
   body.append(geoSection(app, row));
@@ -59,7 +59,7 @@ export async function openCard(app, u) {
         edcBox.replaceWith(edcSection(det.house));
         if (reqBox) reqBox.replaceWith(requestsSection(det.house, app));
       } else {
-        edcBox.replaceWith(h('div', { class: 'note warn' }, icon('warn'), h('div', null, 'Запись ЕДЦ не найдена в текущем снимке — обновите страницу.')));
+        edcBox.replaceWith(h('div', { class: 'note warn' }, icon('warn'), h('div', null, 'Запись ЕДЦ не найдена в текущем снимке. Обновите страницу.')));
         if (reqBox) reqBox.remove();
       }
       entrBox.replaceWith(entrancesSection(app, row, det));
@@ -83,13 +83,13 @@ function yn(v) {
 
 // ---------- сопоставление ----------
 function matchSection(app, row) {
-  const box = sect('Сопоставление МЖИ ↔ ЕДЦ', null);
+  const box = sect('Сопоставление МЖИ и ЕДЦ', null);
   const method = { unom: 'по УНОМ', fias: 'по ФИАС (резервный ключ)', manual: 'вручную' }[row.mm] || '';
-  box.append(kv('Статус', h('span', null, h('b', null, MATCH_LABEL[row.m] || row.m), method ? ` · ${method}` : '')));
+  box.append(kv('Статус', h('span', null, h('b', null, MATCH_LABEL[row.m] || row.m), method ? `, ${method}` : '')));
   if (row.mr) box.append(kv('Правило', row.mr));
   if (row.mc > 1) box.append(kv('Кандидатов ЕДЦ', fmt.int(row.mc)));
   if (row.m === 'conflict' && row.cands && row.cands.length) {
-    const list = h('div', { class: 'stack', style: { gap: '6px' } }, h('div', { class: 'muted small' }, 'Загрузка кандидатов…'));
+    const list = h('div', { class: 'stack', style: { gap: '6px' } }, h('div', { class: 'muted small' }, 'Загрузка кандидатов...'));
     box.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, 'Несколько записей ЕДЦ подходят к этому УНОМ. Дом не участвует в рейтинге, пока соответствие не подтверждено вручную.')), list);
     app.worker.call('records', { rs: row.cands }).then((res) => {
       clear(list);
@@ -98,7 +98,7 @@ function matchSection(app, row) {
         list.append(h('div', { class: 'entr', style: { gridTemplateColumns: '1fr auto' } },
           h('div', null, h('div', null, h('b', null, c.a || '(без адреса)')),
             h('div', { class: 'meta mono' }, c.r),
-            h('div', { class: 'meta' }, `${c.ht || 'тип не указан'} · actual=${c.ac === null ? '—' : c.ac} · подъездов ${c.et}, с привязкой ${c.el} · заявок ${c.q ? c.q[Q.total] : 0}`),
+            h('div', { class: 'meta' }, `${c.ht || 'тип не указан'}, actual=${c.ac === null ? NA : c.ac}, подъездов ${c.et}, с привязкой ${c.el}, заявок ${c.q ? c.q[Q.total] : 0}`),
             h('div', { class: 'meta' }, COV_LABEL[cls.cov], cls.na ? ` (${NA_REASON[cls.na]})` : '')),
           h('button', { class: 'btn btn-sm', onclick: () => app.setOverride(row.u, c.r, 'выбрано вручную среди кандидатов') }, 'Выбрать')));
       }
@@ -124,7 +124,7 @@ function manualPick(app, row) {
     if (!res.items.length) results.append(h('div', { class: 'muted' }, 'Ничего не найдено'));
     for (const c of res.items) {
       results.append(h('div', { class: 'entr', style: { gridTemplateColumns: '1fr auto' } },
-        h('div', null, h('b', null, c.a || '(без адреса)'), h('div', { class: 'meta mono' }, `${c.r} · УНОМ ${c.ur || '—'}`), h('div', { class: 'meta' }, `${c.ht || '—'} · actual=${c.ac} · подъездов ${c.et}`)),
+        h('div', null, h('b', null, c.a || '(без адреса)'), h('div', { class: 'meta mono' }, `${c.r}, УНОМ ${c.ur || NA}`), h('div', { class: 'meta' }, `${c.ht || NA}, actual=${c.ac}, подъездов ${c.et}`)),
         h('button', { class: 'btn btn-sm', onclick: () => { dlg.close(); app.setOverride(row.u, c.r, 'выбрано вручную через поиск'); } }, 'Выбрать')));
     }
   };
@@ -149,7 +149,7 @@ function edcSection(e) {
     kv('Тип дома (house_type)', e.ht),
     kv('Актуальность объекта (actual)', yn(e.ac)),
     kv('Последняя версия записи (is_last)', yn(e.il)),
-    kv('Настройки обслуживания', `${fmt.int(e.rel)} · организаций ${fmt.int(e.org)} · полномочий ${fmt.int(e.au)}`),
+    kv('Настройки обслуживания', `${fmt.int(e.rel)}, организаций ${fmt.int(e.org)}, полномочий ${fmt.int(e.au)}`),
     kv('Платных дефектов (из 30)', e.pd ? `${e.pd}: ${e.pids}` : '0'),
     kv('Признак «все подъезды»', e.allf),
     kv('Покрытие подъездов (ЕДЦ)', e.ct),
@@ -161,25 +161,25 @@ function entrancesSection(app, row, det) {
   const box = sect('Подъезды (ЕДЦ)', null);
   const ents = (det.entrances || []).filter((x) => x.e);
   if (!ents.length) {
-    box.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'В ЕДЦ нет записей о подъездах этого дома. Это не означает, что подъездов нет — дом не оценивается.')));
+    box.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'В ЕДЦ нет записей о подъездах этого дома. Это не значит, что подъездов нет: дом просто не оценивается.')));
     return box;
   }
   const zones = app.state.zones.filter((z) => z.u === row.u);
   const idOnly = ents.filter((x) => isIdLabel(x.lb)).length;
-  if (idOnly) box.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, `У ${idOnly} ${plural(idOnly, 'подъезда', 'подъездов', 'подъездов')} нет номера в ЕДЦ — показан UUID. Это не номер подъезда.`)));
-  box.append(h('div', { class: 'small muted' }, 'Заявки по подъезду — только сопоставленные по UUID подъезда; заявки без подъезда (UNKNOWN), по резервному ID или номеру не распределяются. Не складывайте их с заявками дома.'));
+  if (idOnly) box.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, `У ${idOnly} ${plural(idOnly, 'подъезда', 'подъездов', 'подъездов')} нет номера в ЕДЦ, вместо него показан UUID.`)));
+  box.append(h('div', { class: 'small muted' }, 'Заявки по подъезду учитываются только при совпадении UUID подъезда. Заявки без подъезда (UNKNOWN), по резервному ID или номеру не распределяются. Не складывайте их с заявками дома.'));
   const list = h('div', { class: 'entr-list' });
   ents.sort((a, b) => String(a.lb).localeCompare(String(b.lb), 'ru', { numeric: true }));
   for (const x of ents) {
     const z = zones.find((zz) => zz.entrance_root_id === x.e);
     const linked = x.rel > 0;
     list.append(h('div', { class: 'entr' },
-      h('div', { class: `no ${isIdLabel(x.lb) ? 'id' : ''}`, title: x.e }, isIdLabel(x.lb) ? x.e.slice(0, 8) + '…' : x.lb),
+      h('div', { class: `no ${isIdLabel(x.lb) ? 'id' : ''}`, title: x.e }, isIdLabel(x.lb) ? x.e.slice(0, 8) + '...' : x.lb),
       h('div', null,
         h('div', null, linked ? h('span', { class: 'badge st-full' }, icon('checkCircle', 13), 'есть привязка') : h('span', { class: 'badge st-none' }, icon('xCircle', 13), 'нет найденной привязки'),
           x.bs ? h('span', { class: 'chip', style: { marginLeft: '6px' } }, x.bs) : null),
         h('div', { class: 'meta' }, x.st),
-        h('div', { class: 'meta' }, `Организаций ${x.org} · платных дефектов ${x.pd} · заявок 2026 по UUID подъезда: ${x.q ? fmt.int(x.q[Q.total]) : '—'}`),
+        h('div', { class: 'meta' }, `Организаций ${x.org}, платных дефектов ${x.pd}, заявок 2026 по UUID подъезда: ${x.q ? fmt.int(x.q[Q.total]) : NA}`),
         h('div', { class: 'meta mono' }, x.e)),
       row.u ? h('div', { class: 'stack', style: { gap: '4px', justifyItems: 'end' } },
         z ? h('span', { class: 'chip accent' }, z.accuracy === 'verified' ? 'зона проверена' : 'условная зона') : null,
@@ -202,20 +202,20 @@ function requestsSection(e, app) {
       h('div', { style: { height: `${(v / max) * 56}px`, minHeight: v ? '2px' : '0', background: 'var(--accent)', borderRadius: '4px 4px 0 0', opacity: i === 3 ? 0.55 : 1 } }),
       h('div', { class: 'small muted', style: { textAlign: 'center' } }, ['I', 'II', 'III', 'IV*'][i]))));
   const snap = app.state.snapEdc;
-  return sect('Заявки 2026 — домовой уровень', h('span', { class: 'chip' }, snap && snap.dataDate ? `срез ${fmt.date(snap.dataDate)}` : 'дата среза не указана'),
+  return sect('Заявки 2026, уровень дома', h('span', { class: 'chip' }, snap && snap.dataDate ? `срез ${fmt.date(snap.dataDate)}` : 'дата среза не указана'),
     kv('Всего', h('b', null, fmt.int(q[Q.total]))),
     kv('С датой закрытия / без', `${fmt.int(q[Q.closed])} / ${fmt.int(q[Q.open])}`),
     kv('Критических', fmt.int(q[Q.critical])),
     kv('Без корневого ID адреса / подъезда', `${fmt.int(q[Q.noRootAddr])} / ${fmt.int(q[Q.noRootEntr])}`),
     kv('Последняя заявка', e.qd),
-    kv('Сопоставление агрегатов', `${e.qm || '—'}${e.qg ? ` · групп: ${e.qg}` : ''}`),
+    kv('Сопоставление агрегатов', `${e.qm || NA}${e.qg ? `, групп: ${e.qg}` : ''}`),
     kv('УНОМ из заявок', e.qu ? h('span', null, e.qu, e.qx ? h('span', { class: 'chip warn', style: { marginLeft: '6px' } }, 'расходится с УНОМ адреса') : null) : ''),
     qbars,
-    h('div', { class: 'small muted' }, '* IV квартал 2026 частичный. «Без даты закрытия» — прокси по close_date (9999-12-31 = не закрыта), не статус workflow.'));
+    h('div', { class: 'small muted' }, '* IV квартал 2026 частичный. «Без даты закрытия» считается по close_date (9999-12-31 означает «не закрыта»), это не статус заявки.'));
 }
 
 // ---------- геопривязка ----------
-const GEO_STATUS = { manual: 'указано вручную', verified: 'проверено', auto: 'геокодер — требует проверки', imported: 'импорт из файла' };
+const GEO_STATUS = { manual: 'указано вручную', verified: 'проверено', auto: 'геокодер, требует проверки', imported: 'импорт из файла' };
 
 function geoSection(app, row) {
   const g = app.state.geo.get(row.u);
@@ -227,7 +227,7 @@ function geoSection(app, row) {
       kv('Источник', g.source), kv('Точность', g.accuracy), kv('Контур здания', g.building ? 'есть' : 'нет'),
       kv('Проверено', g.verified_at ? fmt.dateTime(g.verified_at) : ''));
   } else {
-    box.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'Координат нет — дом виден в таблицах и рейтингах, но не на карте. Случайные точки не ставятся.')));
+    box.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'Координат нет. Дом виден в таблицах и рейтингах, но не на карте.')));
   }
   const a = h('div', { class: 'actions-row' });
   if (g) a.append(h('button', { class: 'btn btn-sm', onclick: () => app.showOnMap(row.u) }, icon('map', 14), 'Показать на карте'));
@@ -253,7 +253,7 @@ export async function nominatimConsent() {
 
 async function geocodeDialog(app, row) {
   if (!(await nominatimConsent())) return;
-  const body = h('div', { class: 'stack' }, h('div', { class: 'muted' }, `Поиск: ${row.address}…`));
+  const body = h('div', { class: 'stack' }, h('div', { class: 'muted' }, `Поиск: ${row.address}...`));
   const dlg = modal({ title: 'Координаты из OpenStreetMap', body, wide: true, actions: [{ label: 'Закрыть' }] });
   let cands;
   try {
@@ -272,10 +272,10 @@ async function geocodeDialog(app, row) {
   if (pick < 0) pick = 0;
   const list = h('div', { class: 'stack', style: { gap: '6px' } }, cands.map((c, i) => h('label', { class: 'entr', style: { gridTemplateColumns: '28px 1fr auto', cursor: 'pointer' } },
     h('input', { type: 'radio', name: 'cand', checked: i === pick, onchange: () => { pick = i; } }),
-    h('div', null, h('b', null, `${i + 1}. ${c.display}`), h('div', { class: 'meta' }, `${c.cls}/${c.type}${c.osm ? ` · ${c.osm}` : ''}`), h('div', { class: 'meta' }, accuracyOf(c))),
+    h('div', null, h('b', null, `${i + 1}. ${c.display}`), h('div', { class: 'meta' }, `${c.cls}/${c.type}${c.osm ? `, ${c.osm}` : ''}`), h('div', { class: 'meta' }, accuracyOf(c))),
     c.exact ? h('span', { class: 'badge st-full' }, icon('check', 13), 'номер совпал') : h('span', { class: 'badge st-na' }, 'проверить'))));
-  dlg.setBody(h('div', { class: 'stack' }, h('p', { class: 'ink2' }, `Дом МЖИ: ${row.address}. Кандидаты показаны на карте цифрами — выберите правильный.`), list,
-    h('div', { class: 'small muted' }, 'Данные © участники OpenStreetMap (ODbL). Результат сохраняется со статусом «требует проверки» — подтвердите его после визуальной проверки.')));
+  dlg.setBody(h('div', { class: 'stack' }, h('p', { class: 'ink2' }, `Дом МЖИ: ${row.address}. Кандидаты отмечены на карте цифрами, выберите правильный.`), list,
+    h('div', { class: 'small muted' }, 'Данные © участники OpenStreetMap (ODbL). Результат сохраняется со статусом «требует проверки», подтвердите его после визуальной проверки.')));
   dlg.setActions([
     { label: 'Отмена' },
     {
@@ -306,7 +306,7 @@ async function openGoneCard(app, u) {
 export async function openEdcCard(app, r) {
   const d = drawer();
   clear(d);
-  const body = h('div', { class: 'drawer-body' }, h('div', { class: 'muted' }, 'Загрузка…'));
+  const body = h('div', { class: 'drawer-body' }, h('div', { class: 'muted' }, 'Загрузка...'));
   d.append(h('div', { class: 'drawer-head' }, h('div', { class: 'grow' }, h('h2', null, 'Запись ЕДЦ'), h('div', { class: 'crumbs mono' }, r)),
     h('button', { class: 'icon-btn', 'aria-label': 'Закрыть карточку', onclick: closeCard }, icon('close'))), body);
   d.classList.add('open');
@@ -316,7 +316,7 @@ export async function openEdcCard(app, r) {
   if (mji) {
     body.append(h('div', { class: 'note ok' }, icon('checkCircle'), h('div', null, 'Запись сопоставлена с домом МЖИ: ', h('a', { href: '#', onclick: (ev) => { ev.preventDefault(); openCard(app, mji.u); } }, mji.address))));
   } else {
-    body.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'Запись ЕДЦ не сопоставлена с реестром МЖИ — в рейтинги округов не входит (у ЕДЦ нет поля округа).')));
+    body.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'Запись ЕДЦ не сопоставлена с реестром МЖИ и не входит в рейтинги округов (в ЕДЦ нет поля округа).')));
   }
   if (!det.house) {
     if (det.gone) body.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, `Нет в текущем снимке ЕДЦ (пропала в снимке от ${fmt.date(det.gone.missingSinceDate)}). Последняя известная запись: ${det.gone.a || ''}`)));

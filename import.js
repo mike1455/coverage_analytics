@@ -1,7 +1,7 @@
 // Импорт: клиент Web Worker и мастер «Обновить данные» (выбор файлов → проверка → предпросмотр → применение).
 // Снимок применяется только после подтверждения; накопительные заявки 2026 заменяются, а не складываются.
 
-import { h, clear, fmt, icon, modal, toast, plural } from './ui.js';
+import { h, clear, fmt, NA, na, icon, modal, toast, plural } from './ui.js';
 import { KIND_LABEL, SKIP_KINDS } from './core/edc.js';
 import { getSourcesState, fetchSourceFiles, openSourcesDialog } from './sources.js';
 import { NA_REASON } from './analytics.js';
@@ -51,7 +51,7 @@ function classify(detected) {
     plan.edc = { mode: 'raw', files: { houses: H, entrances: E, requests: R } };
     const miss = [!H && '01_дома.csv (SQL № 2)', !E && '02_подъезды.csv (SQL № 3)', !R && '03_заявки_2026.csv (SQL № 4)'].filter(Boolean);
     if (miss.length) plan.notes.push(`Для импорта сырых выгрузок не хватает: ${miss.join(', ')}.`);
-    if (HM || EM) plan.notes.push('Выбраны и сырые, и объединённые CSV — используются сырые (алгоритм S2 в браузере).');
+    if (HM || EM) plan.notes.push('Выбраны и исходные, и объединённые CSV. Будут использованы исходные.');
   } else if (HM || EM) {
     plan.edc = { mode: 'merged', files: { houses: HM, entrances: EM } };
     const miss = [!HM && 'Дома_ЕДЦ_2026_с_заявками.csv', !EM && 'Подъезды_ЕДЦ_2026_с_заявками.csv'].filter(Boolean);
@@ -61,7 +61,7 @@ function classify(detected) {
     plan.edc = { mode: 'requests', files: { requests: R } };
     plan.notes.push('Будут обновлены только заявки 2026: адреса и подъезды берутся из текущего снимка ЕДЦ (разные даты среза!).');
   }
-  if (by('mji').length > 1) plan.notes.push('Выбрано несколько файлов МЖИ — будет использован первый.');
+  if (by('mji').length > 1) plan.notes.push('Выбрано несколько файлов МЖИ, будет использован первый.');
   return plan;
 }
 
@@ -74,14 +74,14 @@ function edcReady(plan) {
 }
 
 const MODE_LABEL = {
-  raw: 'Три исходных CSV (SQL № 2, № 3, № 4) — объединение по правилам S2 в браузере',
+  raw: 'Три исходных CSV (SQL № 2, № 3, № 4), объединение по правилам S2',
   merged: 'Два объединённых CSV (результат merge_edc_houses.py / merge_edc_entrances.py)',
   requests: 'Только заявки 2026 (SQL № 4) поверх текущего снимка адресов',
 };
 
 /**
  * Открыть мастер. app: {worker, state, reload(), importGeoFiles(files)}.
- * initialFiles — File[] (например, найденные в data/local).
+ * initialFiles - File[] (например, найденные в data/local).
  */
 export function openImportWizard(app, initialFiles = []) {
   let files = [...initialFiles];
@@ -114,9 +114,9 @@ export function openImportWizard(app, initialFiles = []) {
       ondragleave: () => zone.classList.remove('over'),
       ondrop: (e) => { e.preventDefault(); zone.classList.remove('over'); addFiles([...e.dataTransfer.files]); },
     }, icon('upload', 28), h('div', { style: { marginTop: '6px' } }, h('b', null, 'Перетащите файлы сюда'), ' или нажмите, чтобы выбрать'),
-    h('div', { class: 'small muted', style: { marginTop: '4px' } }, 'МЖИ (.xlsx/.csv) · ЕДЦ: три CSV SQL № 2/3/4 или два объединённых CSV · заявки отдельно · геоданные (.csv/.geojson) · контрольные .txt'));
+    h('div', { class: 'small muted', style: { marginTop: '4px' } }, 'МЖИ (.xlsx/.csv), ЕДЦ: три CSV SQL № 2/3/4 или два объединённых CSV, заявки отдельно, геоданные (.csv/.geojson), контрольные .txt'));
     const list = h('div', { class: 'file-list' }, detected.map((d, i) => h('div', { class: 'file-item' },
-      h('div', null, h('div', { class: 'fn' }, d.name), h('div', { class: 'small muted' }, fmt.bytes(d.size), d.error ? ` · ошибка: ${d.error}` : '')),
+      h('div', null, h('div', { class: 'fn' }, d.name), h('div', { class: 'small muted' }, fmt.bytes(d.size), d.error ? `, ошибка: ${d.error}` : '')),
       h('span', { class: `chip ${d.kind === 'unknown' ? 'warn' : SKIP_KINDS.has(d.kind) ? '' : 'accent'}` }, d.kind === 'control' ? 'Контрольный отчёт S2' : KIND_LABEL[d.kind] || d.kind),
       h('button', { class: 'icon-btn', 'aria-label': 'Убрать файл', onclick: () => { files.splice(i, 1); redetect(); } }, icon('close', 16)))));
     const fromFolder = sourcesState ? h('div', { class: 'actions-row' },
@@ -126,7 +126,7 @@ export function openImportWizard(app, initialFiles = []) {
           try {
             const st = await getSourcesState();
             const roles = Object.keys(st.files).filter((r) => st.files[r].exists);
-            if (!roles.length) { toast('В папке выгрузок не найдено ни одного файла — настройте путь и имена', 'error'); return; }
+            if (!roles.length) { toast('В папке выгрузок не найдено ни одного файла. Проверьте путь и имена.', 'error'); return; }
             await addFiles(await fetchSourceFiles(st, roles, () => {}));
           } catch (e) { toast(e.message, 'error'); } finally { ev.target.disabled = false; }
         },
@@ -140,7 +140,7 @@ export function openImportWizard(app, initialFiles = []) {
     if (steps.length) body.append(h('div', { class: 'note' }, icon('list'), h('div', null, h('b', null, 'План импорта'), h('ol', { style: { margin: '4px 0 0', paddingLeft: '18px' } }, steps))));
     for (const n of plan.notes) body.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, n)));
     if (plan.skipped.length) {
-      body.append(h('div', { class: 'note' }, icon('info'), h('div', null, h('b', null, 'Будут пропущены — для импорта не нужны: '),
+      body.append(h('div', { class: 'note' }, icon('info'), h('div', null, h('b', null, 'Для импорта не нужны и будут пропущены: '),
         plan.skipped.map((x) => x.name).join('; '), '.')));
     }
     for (const u of plan.unknown) {
@@ -153,7 +153,7 @@ export function openImportWizard(app, initialFiles = []) {
           h('div', { class: 'small muted' }, 'Аналог --match-by-number из S2: только если номер встречается в доме ровно один раз. Для официальных счётчиков рекомендуется оставить выключенным.'))));
     }
     body.append(h('div', { class: 'note' }, icon('info'), h('div', { class: 'small' },
-      'Файлы обрабатываются локально в браузере (Web Worker) и никуда не отправляются. Новый снимок заменяет предыдущий целиком — накопительные заявки 2026 не суммируются с прошлым месяцем. Геоточки, контуры, зоны подъездов и ручные соответствия сохраняются.')));
+      'Файлы обрабатываются локально в браузере (Web Worker) и никуда не отправляются. Новый снимок заменяет предыдущий целиком, заявки 2026 не суммируются с прошлым месяцем. Геоточки, контуры, зоны подъездов и ручные соответствия сохраняются.')));
     dlg.setBody(body);
     const canRun = !!plan.mji || edcReady(plan) || plan.geo.length > 0;
     dlg.setActions([
@@ -190,10 +190,10 @@ export function openImportWizard(app, initialFiles = []) {
 
   function progressView(title) {
     const bar = h('i');
-    const stage = h('div', { class: 'small ink2' }, 'Подготовка…');
+    const stage = h('div', { class: 'small ink2' }, 'Подготовка...');
     const box = h('div', { class: 'stack' }, h('h3', null, title), h('div', { class: 'progress' }, bar), stage,
       h('div', { class: 'small muted' }, 'Большие файлы (сотни мегабайт) обрабатываются порциями; вкладку не закрывайте.'));
-    return { box, set: (p) => { bar.style.width = `${p.pct || 0}%`; stage.textContent = `${p.stage || ''}${p.rows ? ` · строк: ${fmt.int(p.rows)}` : ''}`; } };
+    return { box, set: (p) => { bar.style.width = `${p.pct || 0}%`; stage.textContent = `${p.stage || ''}${p.rows ? `, строк: ${fmt.int(p.rows)}` : ''}`; } };
   }
 
   function runJob(job, controlTexts) {
@@ -257,7 +257,7 @@ function kpiCmp(before, after) {
     ['Заявок 2026 (дом)', (k) => fmt.int(k.req.total)],
   ];
   return h('div', { class: 'cmp' }, h('div', { class: 'h' }, 'Показатель'), h('div', { class: 'h num' }, 'Сейчас'), h('div', { class: 'h num' }, 'После'),
-    rows.map(([l, f]) => [h('div', null, l), h('div', { class: 'num muted' }, before ? f(before) : '—'), h('div', { class: 'num' }, h('b', null, after ? f(after) : '—'))]));
+    rows.map(([l, f]) => [h('div', null, l), h('div', { class: 'num muted' }, before ? f(before) : na()), h('div', { class: 'num' }, h('b', null, after ? f(after) : na()))]));
 }
 
 function diffTiles(d, hasPrev, unit) {
@@ -281,7 +281,7 @@ function renderPreview(p, dateInput) {
   box.append(...issues(p.report));
   if (p.source === 'mji') {
     const r = p.report;
-    box.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', null, p.file.name), h('span', { class: 'sub' }, `${fmt.int(r.rowsTotal)} записей · ${p.file.format?.toUpperCase() || ''}`)),
+    box.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', null, p.file.name), h('span', { class: 'sub' }, `${fmt.int(r.rowsTotal)} записей, ${p.file.format?.toUpperCase() || ''}`)),
       h('div', { class: 'mini-kpis' },
         mini(r.rowsTotal, 'записей МЖИ'), mini(Object.keys(r.byOkrug || {}).filter((k) => k !== 'Без округа').length, 'округов'),
         mini(r.areas, 'районов'), mini(r.noFias + r.invalidFias, 'без корректного ФИАС'))));
@@ -291,11 +291,11 @@ function renderPreview(p, dateInput) {
   box.append(h('div', { class: 'card' }, h('h3', { style: { marginBottom: '8px' } }, 'Изменения относительно текущего снимка'), diffTiles(p.diff, p.hasPrev, p.source === 'mji' ? 'дома' : 'адреса')));
   if (p.kpiAfter) box.append(h('div', { class: 'card' }, h('h3', { style: { marginBottom: '8px' } }, 'Как изменятся показатели'), kpiCmp(p.kpiBefore, p.kpiAfter),
     p.kpiAfter && p.kpiAfter.na ? h('div', { class: 'small muted', style: { marginTop: '8px' } }, 'Не оценено: ',
-      Object.entries(p.kpiAfter.na).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${NA_REASON[k] || k} — ${fmt.int(n)}`).join('; ')) : null));
+      Object.entries(p.kpiAfter.na).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${NA_REASON[k] || k}: ${fmt.int(n)}`).join('; ')) : null));
   else if (p.source === 'edc' && !p.hasMji) box.append(h('div', { class: 'note' }, icon('info'), h('div', null, 'Реестр МЖИ ещё не загружен: рейтинги по округам появятся после его импорта.')));
   box.append(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', null, 'Дата среза данных'),
     h('span', { class: 'sub' }, p.source === 'mji' ? 'по имени файла' : 'по последней дате заявки / дате файла')), dateInput,
-  h('div', { class: 'small muted', style: { marginTop: '6px' } }, 'Отображается рядом с показателями. 2026 год не завершён: IV квартал — частичный.')));
+  h('div', { class: 'small muted', style: { marginTop: '6px' } }, 'Отображается рядом с показателями. 2026 год не завершён, IV квартал неполный.')));
   return box;
 }
 
@@ -306,13 +306,13 @@ function mini(v, l) {
 function edcControl(p) {
   const c = p.report.control || {};
   const card = h('div', { class: 'card stack' });
-  card.append(h('div', { class: 'card-head' }, h('h3', null, MODE_LABEL[p.mode]), h('span', { class: 'sub' }, p.report.files.map((f) => `${f.name}${f.reused ? ' (из текущего снимка)' : ''}: ${fmt.int(f.rows)} строк${f.encoding ? `, ${f.encoding}` : ''}`).join(' · '))));
+  card.append(h('div', { class: 'card-head' }, h('h3', null, MODE_LABEL[p.mode]), h('span', { class: 'sub' }, p.report.files.map((f) => `${f.name}${f.reused ? ' (из текущего снимка)' : ''}: ${fmt.int(f.rows)} строк${f.encoding ? `, ${f.encoding}` : ''}`).join(', '))));
   const hc = c.houses || {};
   const ec = c.entrances || {};
   card.append(h('div', { class: 'mini-kpis' },
     mini(hc.rows, 'адресов (строк SQL № 2)'), mini(ec.real, 'реальных подъездов'), mini(ec.stubs, 'строк-заглушек без подъездов'), mini(hc.matched, 'адресов с заявками 2026')));
   if (c.requests) {
-    card.append(h('div', { class: 'small ink2' }, `Агрегатов заявок: уровень «Дом» — ${fmt.int(c.requests.houseLevel)}, «Подъезд» — ${fmt.int(c.requests.entranceLevel)}. `,
+    card.append(h('div', { class: 'small ink2' }, `Агрегатов заявок: уровень «Дом» ${fmt.int(c.requests.houseLevel)}, «Подъезд» ${fmt.int(c.requests.entranceLevel)}. `,
       `Заявок 2026 в домовых агрегатах: ${fmt.int(c.requests.houseLevelRequests)}. Уровни «Дом» и «Подъезд» не складываются.`));
   }
   const um = (rep, title) => {
@@ -324,7 +324,7 @@ function edcControl(p) {
   };
   card.append(um(c.unmatchedHouse, 'Домовой уровень'), um(c.unmatchedEntrance, 'Подъездный уровень (UNKNOWN, entrances.id, NUMBER не распределяются)'));
   if (hc.mismatch) card.append(h('div', { class: 'small muted' }, `Расхождение УНОМ между адресом и заявками (сопоставление по UUID сохранено): ${fmt.int(hc.mismatch)} ${plural(hc.mismatch, 'дом', 'дома', 'домов')}.`));
-  if (ec.matchByNumber) card.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, `Включено условное сопоставление по номеру подъезда: добавлено ${fmt.int(ec.numberMatched)} совпадений, неоднозначных номеров — ${fmt.int(ec.ambiguousNumbers)}.`)));
+  if (ec.matchByNumber) card.append(h('div', { class: 'note warn' }, icon('warn'), h('div', null, `Включено условное сопоставление по номеру подъезда: добавлено ${fmt.int(ec.numberMatched)} совпадений, неоднозначных номеров ${fmt.int(ec.ambiguousNumbers)}.`)));
   return card;
 }
 
@@ -337,7 +337,7 @@ export async function discoverLocal() {
     if (!res.ok) return [];
     const html = await res.text();
     const names = [...html.matchAll(/href="([^"?#]+)"/g)].map((m) => decodeURIComponent(m[1]))
-      .filter((n) => !n.endsWith('/') && /\.(xlsx|csv|txt|geojson|json|pmtiles)$/i.test(n) && !n.startsWith('.'));
+      .filter((n) => !n.endsWith('/') && /\.(xlsx|csv|txt|geojson|json)$/i.test(n) && !n.startsWith('.') && !/\.pmtiles\.json$/i.test(n));
     return [...new Set(names)].map((n) => ({ name: n.split('/').pop(), url: `data/local/${encodeURIComponent(n.split('/').pop())}` }));
   } catch (_) {
     return [];

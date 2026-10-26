@@ -9,7 +9,7 @@ export class CsvParser {
     this.field = '';
     this.row = [];
     this.inQuotes = false;
-    this.quotePending = false; // встретили кавычку внутри кавычек — ждём следующий символ
+    this.quotePending = false; // встретили кавычку внутри кавычек - ждём следующий символ
     this.rowsEmitted = 0;
     this.lastWasCR = false;
   }
@@ -66,7 +66,7 @@ export class CsvParser {
         if (cj === d || cj === '\n' || cj === '\r' || cj === '"') break;
         j++;
       }
-      // Кавычка в середине неэкранированного поля — допускаем как обычный символ.
+      // Кавычка в середине неэкранированного поля - допускаем как обычный символ.
       if (j < n && chunk[j] === '"') { this.field += chunk.slice(i, j + 1); i = j + 1; continue; }
       this.field += chunk.slice(i, j);
       i = j;
@@ -115,8 +115,8 @@ export function detectEncoding(bytes) {
 
 /**
  * Потоковое чтение CSV из Blob/File (браузер, worker).
- * onRow(rowArray, lineNo) вызывается для каждой строки данных, onHeader(headers) — один раз.
- * Каждые ~4 МБ вызывается await onChunk(progress) — для записи пачек в IndexedDB.
+ * onRow(rowArray, lineNo) вызывается для каждой строки данных, onHeader(headers) - один раз.
+ * Каждые ~4 МБ вызывается await onChunk(progress) - для записи пачек в IndexedDB.
  */
 export async function readCsvBlob(blob, { encoding = 'auto', delimiter = 'auto', onHeader, onRow, onChunk } = {}) {
   const head = new Uint8Array(await blob.slice(0, 65536).arrayBuffer());

@@ -18,10 +18,10 @@
   <div class="app" id="app">
     <nav class="nav" aria-label="Разделы">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true"></div>
+        <div class="brand-mark" aria-hidden="true"><span data-icon="map"></span></div>
         <div class="brand-text">
           <div class="brand-title">Coverage Analytics</div>
-          <div class="brand-sub">Москва · ЕДЦ · МЖИ</div>
+          <div class="brand-sub">Москва, ЕДЦ, МЖИ</div>
         </div>
       </div>
       <button class="nav-item" data-view="map"><span data-icon="map"></span><span class="label">Карта</span></button>
@@ -29,7 +29,7 @@
       <button class="nav-item" data-view="rating"><span data-icon="chart"></span><span class="label">Рейтинг округов</span></button>
       <button class="nav-item" data-view="houses"><span data-icon="building"></span><span class="label">Дома и подъезды</span></button>
       <div class="nav-sep"></div>
-      <button class="nav-item" data-view="import"><span data-icon="database"></span><span class="label">Импорт / качество данных</span></button>
+      <button class="nav-item" data-view="import"><span data-icon="database"></span><span class="label">Импорт и качество данных</span></button>
       <div class="nav-status" id="nav-status"></div>
     </nav>
 
@@ -53,7 +53,7 @@
       <h2>Откройте приложение через локальный сервер</h2>
       <p style="margin-top:10px">Браузер не разрешает модулям и Web Worker работать со страницы, открытой как файл. Запустите в папке приложения:</p>
       <pre class="raw">py -3 serve.py</pre>
-      <p>и откройте <b>http://localhost:8000</b>. Подойдёт и <span class="mono">python -m http.server 8000</span> (без офлайн-подложки PMTiles).</p>
+      <p>и откройте <b>http://localhost:8000</b>. На Windows достаточно дважды щёлкнуть start.bat.</p>
     </div>
   </div>
   <script>

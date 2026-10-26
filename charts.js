@@ -1,7 +1,7 @@
 // Лёгкие HTML/SVG-графики: горизонтальные столбцы рейтинга, составная полоса структуры покрытия,
-// схема 12 округов (условная раскладка, не в масштабе). Подписи — текстовыми токенами, цвет — только для меток.
+// схема 12 округов (условная раскладка, не в масштабе). Подписи - текстовыми токенами, цвет - только для меток.
 
-import { h, fmt } from './ui.js';
+import { h, fmt, NA } from './ui.js';
 import { OKRUGS } from './core/okrugs.js';
 
 // ---------- общий тултип ----------
@@ -53,7 +53,7 @@ export function barChart(items, { onClick, selected, max } = {}) {
       onclick: () => onClick && onClick(it.key),
       onkeydown: (e) => { if (e.key === 'Enter' && onClick) onClick(it.key); },
     },
-    h('div', { class: 'rank' }, it.rank ? `${it.rank}` : '—'),
+    h('div', { class: 'rank' }, it.rank ? `${it.rank}` : ''),
     h('div', { class: 'lbl' }, it.label),
     h('div', { class: 'bar-track' }, Number.isFinite(it.value) ? h('div', { class: `bar-fill ${it.muted ? 'muted-fill' : ''}`, style: { width: `${w}%` } }) : null),
     h('div', { class: 'bar-val' }, it.valueText, it.sub ? h('small', null, it.sub) : null));
@@ -103,7 +103,7 @@ export function okrugTiles(groups, { onClick, selected, min, max } = {}) {
       },
       h('div', { class: 't-code' }, o.code),
       g.flag ? h('div', { class: 't-flag', title: g.flagTitle || '' }, g.flag) : null,
-      h('div', null, h('div', { class: 't-val' }, g.valueText ?? '—'), g.n ? h('div', { class: 't-n' }, g.n) : null));
+      h('div', null, h('div', { class: 't-val' }, g.valueText ?? NA), g.n ? h('div', { class: 't-n' }, g.n) : null));
       if (g.tip) withTip(tile, g.tip);
       cells.push(tile);
     }

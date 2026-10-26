@@ -1,6 +1,6 @@
-// Геоданные: геокодирование (OSM Nominatim — только по явному действию пользователя и с его согласия),
+// Геоданные: геокодирование (OSM Nominatim - только по явному действию пользователя и с его согласия),
 // границы округов/районов (OSM Overpass или GeoJSON-файл), импорт/экспорт координат.
-// Ничего не геокодируется автоматически и массово: политика Nominatim — не более 1 запроса в секунду.
+// Ничего не геокодируется автоматически и массово: политика Nominatim - не более 1 запроса в секунду.
 
 import { normUnom, str } from './core/util.js';
 import { normOkrug, areaKey } from './core/okrugs.js';
@@ -31,7 +31,7 @@ export function parseMjiAddress(address) {
   const rest = [];
   for (const p of parts) {
     let m;
-    // Длинные варианты раньше коротких; значение обязано начинаться с цифры («деревня Раево» — не дом).
+    // Длинные варианты раньше коротких; значение обязано начинаться с цифры («деревня Раево» - не дом).
     if ((m = p.match(/^(?:дом|владение|влд\.?|вл\.?|д\.?)\s*(\d.*)$/i))) house = m[1].replace(/\s+/g, '');
     else if ((m = p.match(/^(?:корпус|корп\.?|к\.?)\s*(\d.*)$/i))) korp = m[1].replace(/\s+/g, '');
     else if ((m = p.match(/^(?:строение|стр\.?|с\.?)\s*(\d.*)$/i))) stroy = m[1].replace(/\s+/g, '');
@@ -148,7 +148,7 @@ export function annotateBoundaries(fc, kind, knownAreas = []) {
   return { fc, unmatched };
 }
 
-// ---------- упрощение геометрии (Дуглас — Пекер) ----------
+// ---------- упрощение геометрии (Дуглас - Пекер) ----------
 
 function sqSegDist(p, a, b) {
   let x = a[0]; let y = a[1];
@@ -189,7 +189,7 @@ export function simplifyGeometry(g, tol) {
 export function centroidOf(geom) {
   const ring = geom.type === 'Polygon' ? geom.coordinates[0] : geom.type === 'MultiPolygon' ? geom.coordinates[0][0] : null;
   if (!ring) return null;
-  // Смещение к первой вершине — иначе при координатах ~37/55 теряется точность.
+  // Смещение к первой вершине - иначе при координатах ~37/55 теряется точность.
   const [x0, y0] = ring[0];
   let a = 0; let cx = 0; let cy = 0;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {

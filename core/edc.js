@@ -1,6 +1,6 @@
 // Выгрузки ЕДЦ: SQL № 2 (дома), № 3 (подъезды), № 4 (агрегаты заявок 2026) и
 // объединённые CSV из merge_edc_houses.py / merge_edc_entrances.py (инструкция S2).
-// Алгоритм объединения повторяет S2 один в один — см. tests/parity.test.mjs.
+// Алгоритм объединения повторяет S2 один в один - см. tests/parity.test.mjs.
 
 import { resolveColumns, getter } from './headers.js';
 import {
@@ -123,16 +123,16 @@ export function detectKind(header) {
 
 export const KIND_LABEL = {
   mji: 'Реестр МЖИ',
-  houses: 'SQL № 2 — все адреса (01_дома.csv)',
-  entrances: 'SQL № 3 — адреса и подъезды (02_подъезды.csv)',
-  requests: 'SQL № 4 — заявки 2026 (03_заявки_2026.csv)',
+  houses: 'SQL № 2, все адреса (01_дома.csv)',
+  entrances: 'SQL № 3, адреса и подъезды (02_подъезды.csv)',
+  requests: 'SQL № 4, заявки 2026 (03_заявки_2026.csv)',
   houses_merged: 'Объединённый «Дома_ЕДЦ_2026_с_заявками.csv»',
   entrances_merged: 'Объединённый «Подъезды_ЕДЦ_2026_с_заявками.csv»',
   geo: 'Геоданные (CSV/GeoJSON)',
-  sql1: 'SQL № 1 — контрольный, для импорта не нужен',
-  sql5: 'SQL № 5 — контрольный, для импорта не нужен',
-  sql6: 'SQL № 6 — платные дефекты, для импорта не нужен',
-  doc: 'Документ — для импорта не нужен',
+  sql1: 'SQL № 1, контрольный, для импорта не нужен',
+  sql5: 'SQL № 5, контрольный, для импорта не нужен',
+  sql6: 'SQL № 6, платные дефекты, для импорта не нужен',
+  doc: 'Документ, для импорта не нужен',
   unknown: 'Не распознан',
 };
 
@@ -329,7 +329,7 @@ export function houseReader(header, merged) {
       (merged ? ' Ожидался объединённый файл (merge_edc_houses.py).' : ''));
   }
   if (!merged && Object.keys(MERGED_SPEC).some((f) => cols.index[f] !== undefined)) {
-    throw new ImportError('CSV домов уже содержит колонки статистики — это объединённый файл, выберите режим «2 объединённых CSV».');
+    throw new ImportError('CSV домов уже содержит колонки статистики. Это объединённый файл, выберите режим «2 объединённых CSV».');
   }
   const gi = getter(cols.index);
   const width = header.length;
@@ -372,7 +372,7 @@ export function entranceReader(header, merged) {
       (merged ? ' Ожидался объединённый файл (merge_edc_entrances.py).' : ''));
   }
   if (!merged && Object.keys(MERGED_SPEC).some((f) => cols.index[f] !== undefined)) {
-    throw new ImportError('CSV подъездов уже содержит колонки статистики — это объединённый файл, выберите режим «2 объединённых CSV».');
+    throw new ImportError('CSV подъездов уже содержит колонки статистики. Это объединённый файл, выберите режим «2 объединённых CSV».');
   }
   const gi = getter(cols.index);
   const width = header.length;
@@ -441,7 +441,7 @@ export function mergeHouse(rec, index) {
 
 /**
  * Объединение одного подъезда по правилам merge_edc_entrances.py.
- * numberCounts — Map `${type}|${key}|${number}` → количество (только при matchByNumber).
+ * numberCounts - Map `${type}|${key}|${number}` → количество (только при matchByNumber).
  */
 export function mergeEntrance(e, index, { matchByNumber = false, numberCounts = null, counters = null } = {}) {
   const addr = addressKeys(e.ro, e.i);

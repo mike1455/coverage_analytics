@@ -10,7 +10,7 @@ export const STORES = {
   meta: { keyPath: 'key' },
   snapshots: { keyPath: 'id' },
   mji: { keyPath: ['s', 'u'] },
-  // Снимки ЕДЦ — в двух чередующихся «слотах»: новый пишется в свободный, старый после переключения
+  // Снимки ЕДЦ - в двух чередующихся «слотах»: новый пишется в свободный, старый после переключения
   // очищается через clear() (мгновенно), а не построчным delete(range) с обновлением индексов.
   edc_houses_0: { keyPath: ['s', 'r'], indexes: { by_unom: ['s', 'un'], by_fias: ['s', 'fi'], by_rec: ['s', 'i'] } },
   edc_houses_1: { keyPath: ['s', 'r'], indexes: { by_unom: ['s', 'un'], by_fias: ['s', 'fi'], by_rec: ['s', 'i'] } },
@@ -29,7 +29,7 @@ export const H = (slot) => `edc_houses_${slot || 0}`;
 export const E = (slot) => `edc_entr_${slot || 0}`;
 export const SOURCE_STORES = ['snapshots', 'mji', 'edc_houses_0', 'edc_houses_1', 'edc_entr_0', 'edc_entr_1', 'edc_gone', 'mji_gone', 'cache'];
 
-// Хранилища, которые относятся к ручной работе пользователя — их нельзя терять при импорте.
+// Хранилища, которые относятся к ручной работе пользователя - их нельзя терять при импорте.
 export const USER_STORES = ['geo', 'zones', 'overrides', 'geoq'];
 
 let dbPromise = null;
@@ -149,9 +149,9 @@ export async function getActive() {
   return (await getMeta('active')) || { mji: null, edc: null, edcSlot: 0 };
 }
 
-// ---------- кэш сопоставления МЖИ↔ЕДЦ: заголовок + порции строк ----------
-// Одно значение на десятки мегабайт IndexedDB хранит как внешний blob — медленно и ненадёжно.
-// Поэтому строки пишутся порциями по JOIN_CHUNK, а заголовок (идентификаторы снимков, KPI) — отдельно.
+// ---------- кэш сопоставления МЖИ и ЕДЦ: заголовок + порции строк ----------
+// Одно значение на десятки мегабайт IndexedDB хранит как внешний blob - медленно и ненадёжно.
+// Поэтому строки пишутся порциями по JOIN_CHUNK, а заголовок (идентификаторы снимков, KPI) - отдельно.
 export const JOIN_CHUNK = 2000;
 
 /** Записать кэш в уже открытую транзакцию (хранилище cache). Возвращает промис завершения запросов. */
@@ -172,7 +172,7 @@ export async function getJoined() {
     const parts = await Promise.all(Array.from({ length: head.chunks || 0 }, (_, i) => reqP(s.cache.get(`joined:${i}`))));
     const rows = [];
     for (const p of parts) if (p) for (const r of p.rows) rows.push(r);
-    if (rows.length !== head.count) return null; // повреждённый кэш — будет пересчитан
+    if (rows.length !== head.count) return null; // повреждённый кэш - будет пересчитан
     return { ...head, rows };
   });
 }

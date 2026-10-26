@@ -19,7 +19,7 @@ export function isUuid(v) {
   return UUID_RE.test(str(v));
 }
 
-/** UUID ЕДЦ: как в S2 — trim + нижний регистр. */
+/** UUID ЕДЦ: как в S2 - trim + нижний регистр. */
 export function normUuid(v) {
   return ob(str(v).toLowerCase());
 }
@@ -74,7 +74,7 @@ export class ImportError extends Error {
   }
 }
 
-/** FNV-1a 32 bit — быстрый хэш для сравнения снимков (не криптографический). */
+/** FNV-1a 32 bit - быстрый хэш для сравнения снимков (не криптографический). */
 export function fnv1a(s) {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {

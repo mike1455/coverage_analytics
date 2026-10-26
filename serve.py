@@ -3,7 +3,8 @@
 """Локальный сервер приложения: http://localhost:8000 (только стандартная библиотека Python 3.8+).
 
 Отличия от `python -m http.server 8000`:
-  * поддерживает HTTP Range — нужно для офлайн-подложки data/local/moscow.pmtiles;
+  * поддерживает HTTP Range, нужно для офлайн-карты data/local/moscow.pmtiles;
+  * скачивает и обновляет офлайн-карту Москвы по кнопке в приложении (tools/basemap.py);
   * слушает только 127.0.0.1 (данные не видны в локальной сети);
   * правильные MIME-типы для .js/.mjs/.pmtiles/.geojson и отключённый кэш для файлов приложения;
   * локальный API «Папка с выгрузками»: приложение читает ваши файлы прямо с диска по путям из
@@ -21,24 +22,29 @@ import re
 import shutil
 import socketserver
 import sys
+import threading
 import urllib.parse
 import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "tools"))
+import basemap  # noqa: E402
+
 DEFAULT_CONFIG = ROOT / "config" / "sources.default.json"
 LOCAL_CONFIG = Path(os.environ.get("MCA_SOURCES_CONFIG") or (ROOT / "config" / "sources.local.json"))
 
 # Роли файлов, которые приложение умеет загружать из папки. Остальные выгрузки (№ 1, № 5, № 6, .md) не нужны.
 ROLES = {
-    "mji": "Реестр МКД МЖИ (.xlsx или .csv)",
-    "houses": "SQL № 2 — все адреса, одна строка на дом (.csv)",
-    "entrances": "SQL № 3 — адреса и подъезды, одна строка на подъезд (.csv)",
-    "requests": "SQL № 4 — заявки 2026 по дому и подъезду (.csv)",
-    "geo": "Геоданные (.csv с unom, lat, lon или .geojson) — необязательно",
+    "mji": "реестр МКД, .xlsx или .csv",
+    "houses": "все адреса, одна строка на дом, .csv",
+    "entrances": "адреса и подъезды, одна строка на подъезд, .csv",
+    "requests": "заявки 2026 по дому и подъезду, .csv",
+    "geo": "unom, lat, lon в .csv или .geojson, необязательно",
 }
 ALLOWED_EXT = {".csv", ".xlsx", ".txt", ".json", ".geojson"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
+BASEMAP_FILE = Path(os.environ.get("MCA_BASEMAP_FILE") or basemap.OUTPUT)
 
 
 # ---------------------------------------------------------------- настройки источников
@@ -88,7 +94,7 @@ def load_config():
     if local:
         if "folder" in local:
             cfg["folder"] = local["folder"]
-            cfg["fallbackFolders"] = []  # папку задал пользователь — запасные варианты не нужны
+            cfg["fallbackFolders"] = []  # папку задал пользователь - запасные варианты не нужны
         cfg["files"].update(local.get("files", {}))
     cfg["files"] = {r: str(cfg["files"].get(r, "") or "") for r in ROLES}
     return cfg, bool(local)
@@ -96,7 +102,7 @@ def load_config():
 
 def resolve_folder(raw, fallbacks=(), names=()):
     """Основная папка, затем запасные. Берётся первая, где лежит хотя бы один из нужных файлов;
-    если файлов нет нигде — первая существующая папка."""
+    если файлов нет нигде - первая существующая папка."""
     cands = []
     for r in [raw, *fallbacks]:
         for c in folder_candidates(r):
@@ -115,7 +121,7 @@ def resolve_file(folder, name):
     name = str(name or "").strip().strip('"').strip()
     if not name:
         return None
-    # Относительное имя — внутри папки с выгрузками (а не папки приложения)
+    # Относительное имя - внутри папки с выгрузками (а не папки приложения)
     return os.path.normpath(expand_path(name, base=folder))
 
 
@@ -173,6 +179,39 @@ def save_config(data):
     tmp = LOCAL_CONFIG.with_suffix(".tmp")
     tmp.write_text(json.dumps({"folder": folder, "files": files}, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, LOCAL_CONFIG)
+
+
+# ---------------------------------------------------------------- офлайн-карта
+
+BASEMAP_JOB = basemap.Progress()
+_basemap_thread = None
+_basemap_lock = threading.Lock()
+
+
+def basemap_state():
+    st = basemap.status(BASEMAP_FILE)
+    st["job"] = BASEMAP_JOB.snapshot()
+    return st
+
+
+def start_basemap(data):
+    """Скачать или обновить карту в фоне. Прежний файл заменяется только после успешной загрузки."""
+    global _basemap_thread
+    if not isinstance(data, dict):
+        raise ValueError("Ожидается JSON-объект")
+    maxzoom = max(10, min(15, int(data.get("maxzoom") or basemap.DEFAULT_MAXZOOM)))
+    source = data.get("source") or os.environ.get("MCA_BASEMAP_SOURCE") or None
+    if source and not str(source).startswith(("http://", "https://")):
+        raise ValueError("Источник карты должен быть адресом http(s)")
+    with _basemap_lock:
+        if _basemap_thread and _basemap_thread.is_alive():
+            return False
+        BASEMAP_JOB.reset()
+        BASEMAP_JOB.set(state="running", stage="Подготовка")
+        _basemap_thread = threading.Thread(target=basemap.download, args=(BASEMAP_JOB,), daemon=True,
+                                           kwargs={"out": BASEMAP_FILE, "maxzoom": maxzoom, "source": source})
+        _basemap_thread.start()
+    return True
 
 
 # ---------------------------------------------------------------- HTTP
@@ -236,7 +275,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not self._local_request():
             return self._json(403, {"error": "Доступ только с localhost"})
         route = urllib.parse.urlsplit(self.path).path
-        if route not in ("/api/sources", "/api/open-folder"):
+        if route not in ("/api/sources", "/api/open-folder", "/api/basemap/download", "/api/basemap/cancel"):
             return self._json(404, {"error": "Нет такого метода"})
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json(415, {"error": "Нужен Content-Type: application/json"})
@@ -247,6 +286,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if length > 65536:
                 return self._json(413, {"error": "Слишком большой запрос"})
             data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if route == "/api/basemap/cancel":
+                BASEMAP_JOB.cancel.set()
+                return self._json(200, basemap_state())
+            if route == "/api/basemap/download":
+                if not start_basemap(data):
+                    return self._json(409, {"error": "Загрузка карты уже идёт", **basemap_state()})
+                return self._json(202, basemap_state())
             save_config(data)
         except (ValueError, OSError) as e:
             return self._json(400, {"error": str(e)})
@@ -279,6 +325,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/sources":
             return self._json(200, sources_state())
+        if path == "/api/basemap":
+            return self._json(200, basemap_state())
         m = re.fullmatch(r"/api/source/([a-z]+)", path)
         if not m:
             return self._json(404, {"error": "Нет такого метода"})
@@ -378,15 +426,19 @@ def main():
     except OSError as e:
         print("Не удалось занять порт %d: %s. Попробуйте --port 8080." % (args.port, e), file=sys.stderr)
         return 1
-    pm = ROOT / "data" / "local" / "moscow.pmtiles"
     st = sources_state()
+    bm = basemap.status(BASEMAP_FILE)
     print("Moscow Coverage Analytics: %s" % url)
-    print("Офлайн-подложка: %s" % ("найдена" if pm.exists() else "нет (data/local/moscow.pmtiles) — будет онлайн-подложка"))
-    print("Папка с выгрузками: %s — %s" % (st["folderResolved"] or "(не задана)", "найдена" if st["folderExists"] else "НЕ найдена"))
+    if bm["exists"]:
+        build = (bm.get("meta") or {}).get("build") or ""
+        print("Офлайн-карта: %s (%.0f МБ%s)" % (BASEMAP_FILE, bm["size"] / 1e6, ", сборка %s" % build if build else ""))
+    else:
+        print("Офлайн-карта: не скачана. Скачать можно в приложении: Карта, кнопка «Скачать карту Москвы».")
+    print("Папка с выгрузками: %s (%s)" % (st["folderResolved"] or "(не задана)", "найдена" if st["folderExists"] else "НЕ найдена"))
     for role, info in st["files"].items():
         if info["name"]:
-            print("  %-9s %s %s" % (role, "✓" if info["exists"] else "✗", info["name"]))
-    print("Путь и имена файлов меняются в приложении: «Импорт / качество данных» → «Папка с выгрузками».")
+            print("  %-9s %s %s" % (role, "найден   " if info["exists"] else "не найден", info["name"]))
+    print("Путь и имена файлов меняются в приложении: «Импорт и данные», кнопка «Папка с выгрузками».")
     print("Остановить: Ctrl+C")
     if not args.no_browser:
         try:
