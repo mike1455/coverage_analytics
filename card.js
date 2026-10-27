@@ -1,7 +1,8 @@
 // Карточка дома (правая панель): МЖИ, сопоставление с ЕДЦ, признаки ЕДЦ, подъезды, заявки 2026, геопривязка.
 
 import { h, clear, fmt, NA, na, icon, kv, statusBadge, toast, modal, confirmDialog, plural } from './ui.js';
-import { MATCH_LABEL, NA_REASON, COV_LABEL, classify } from './analytics.js';
+import { MATCH_LABEL, NA_REASON, COV_LABEL, classify, houseStatus, HS_HINT } from './analytics.js';
+import { hsBadge } from './charts.js';
 import { Q, isIdLabel } from './core/edc.js';
 import { nominatimSearch, accuracyOf, centroidOf } from './geo.js';
 
@@ -22,7 +23,9 @@ export async function openCard(app, u) {
       h('h2', null, row.address || '(адрес не указан)'),
       h('div', { class: 'crumbs' }, [row.okrug, row.area, `UNOM ${row.ur || NA}`].filter(Boolean).join(', ')),
       h('div', { style: { marginTop: '8px', display: 'flex', gap: '6px', flexWrap: 'wrap' } },
-        statusBadge(row.cov, row.cov === 'na' || row.cov === 'excluded' ? `${COV_LABEL[row.cov]}: ${NA_REASON[row.na] || ''}` : null))),
+        hsBadge(houseStatus(row)),
+        row.na ? h('span', { class: 'chip' }, NA_REASON[row.na] || row.na) : null),
+      h('div', { class: 'small muted', style: { marginTop: '6px' } }, HS_HINT[houseStatus(row)])),
     h('button', { class: 'icon-btn', 'aria-label': 'Закрыть карточку', onclick: closeCard }, icon('close')));
   const body = h('div', { class: 'drawer-body' });
   d.append(head, body);
@@ -31,7 +34,7 @@ export async function openCard(app, u) {
   const e = row.e;
   const q = row.q;
   body.append(h('div', { class: 'mini-kpis' },
-    mini(e ? `${fmt.int(e.el)} / ${fmt.int(e.et)}` : NA, 'подъездов с привязкой / всего'),
+    mini(e ? `${fmt.int(Math.min(e.el, e.et))} / ${fmt.int(e.et)}` : NA, 'подъездов обслуживается / всего'),
     mini(q ? fmt.int(q[Q.total]) : NA, 'заявок 2026 (дом)'),
     mini(q ? fmt.int(q[Q.open]) : NA, 'без даты закрытия'),
     mini(q ? fmt.int(q[Q.critical]) : NA, 'критических')));

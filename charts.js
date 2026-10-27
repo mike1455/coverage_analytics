@@ -1,8 +1,9 @@
 // Лёгкие HTML/SVG-графики: горизонтальные столбцы рейтинга, составная полоса структуры покрытия,
 // схема 12 округов (условная раскладка, не в масштабе). Подписи - текстовыми токенами, цвет - только для меток.
 
-import { h, fmt, NA } from './ui.js';
+import { h, fmt, NA, icon } from './ui.js';
 import { OKRUGS } from './core/okrugs.js';
+import { METRICS, HS_LABEL } from './analytics.js';
 
 // ---------- общий тултип ----------
 let tipEl = null;
@@ -21,23 +22,53 @@ export function showTip(ev, content) {
 }
 export function hideTip() { if (tipEl) tipEl.style.display = 'none'; }
 
-function withTip(el, fn) {
+export function withTip(el, fn) {
   el.addEventListener('mousemove', (e) => showTip(e, fn()));
   el.addEventListener('mouseleave', hideTip);
   return el;
 }
 
-// ---------- последовательная шкала (один оттенок, светлый → тёмный) ----------
-const SEQ = ['--seq-100', '--seq-200', '--seq-300', '--seq-400', '--seq-500', '--seq-600', '--seq-700'];
-export function seqVar(t) {
+// ---------- последовательные шкалы: синяя (подключение) и оранжевая (активность заявок) ----------
+const STEPS = [100, 200, 300, 400, 500, 600, 700];
+export function rampVar(ramp, t) {
   if (t === null || t === undefined || Number.isNaN(t)) return null;
-  const i = Math.max(0, Math.min(SEQ.length - 1, Math.round(t * (SEQ.length - 1))));
-  return { color: `var(${SEQ[i]})`, ink: `var(${SEQ[i].replace('--seq-', '--seq-ink-')})` };
+  const step = STEPS[Math.max(0, Math.min(STEPS.length - 1, Math.round(t * (STEPS.length - 1))))];
+  const pre = ramp === 'heat' ? 'heat' : 'seq';
+  return { color: `var(--${pre}-${step})`, ink: `var(--${pre}-ink-${step})`, name: `--${pre}-${step}` };
 }
-export function seqColorResolved(t) {
-  const v = seqVar(t);
-  if (!v) return null;
-  return getComputedStyle(document.documentElement).getPropertyValue(v.color.slice(4, -1)).trim();
+export const seqVar = (t) => rampVar('blue', t);
+export function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+export function rampResolved(ramp, t) {
+  const v = rampVar(ramp, t);
+  return v ? cssVar(v.name) : null;
+}
+export const seqColorResolved = (t) => rampResolved('blue', t);
+/** Цвета ступеней шкалы для легенды. */
+export function rampSteps(ramp) {
+  return STEPS.map((_, i) => rampVar(ramp, i / (STEPS.length - 1)));
+}
+
+// ---------- статусы домов: цвет всегда вместе с иконкой и подписью ----------
+export const HS_COLOR = {
+  full: 'var(--hs-full)', partial: 'var(--hs-partial)', none: 'var(--hs-none)', unknown: 'var(--hs-unknown)', excluded: 'var(--hs-excluded)',
+};
+export const HS_ICON = { full: 'checkCircle', partial: 'half', none: 'xCircle', unknown: 'help', excluded: 'slash' };
+
+/** Значок статуса дома: цвет, иконка и подпись вместе. */
+export function hsBadge(st, text) {
+  return h('span', { class: `badge hs-${st}` }, icon(HS_ICON[st], 14), text || HS_LABEL[st]);
+}
+
+/** Значение показателя для подписи. */
+export function fmtMetric(id, v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return NA;
+  const f = (METRICS[id] || {}).fmt;
+  if (f === 'pct') return fmt.pct(v);
+  if (f === 'num1') return fmt.num1(v);
+  if (f === 'num2') return fmt.num2(v);
+  return fmt.int(v);
 }
 
 /**
@@ -82,7 +113,7 @@ export function legend(parts) {
  * Схема округов: плитки в условной раскладке «как на карте».
  * groups: Map(code → {value, valueText, n, flag, tip})
  */
-export function okrugTiles(groups, { onClick, selected, min, max } = {}) {
+export function okrugTiles(groups, { onClick, selected, min, max, ramp = 'blue' } = {}) {
   const vals = [...groups.values()].map((g) => g.value).filter((v) => Number.isFinite(v));
   const lo = min ?? Math.min(...vals);
   const hi = max ?? Math.max(...vals);
@@ -95,7 +126,7 @@ export function okrugTiles(groups, { onClick, selected, min, max } = {}) {
       if (!o) { cells.push(h('div', { class: 'tile empty-cell', 'aria-hidden': 'true' })); continue; }
       const g = groups.get(o.code) || {};
       const t = Number.isFinite(g.value) && hi > lo ? (g.value - lo) / (hi - lo) : Number.isFinite(g.value) ? 0.5 : null;
-      const sv = seqVar(t);
+      const sv = rampVar(ramp, t);
       const tile = h('div', {
         class: `tile ${selected && selected !== o.code ? 'dim' : ''} ${selected === o.code ? 'sel' : ''}`,
         style: sv ? { background: sv.color, color: sv.ink } : {},
@@ -112,5 +143,5 @@ export function okrugTiles(groups, { onClick, selected, min, max } = {}) {
   }
   return h('div', null,
     h('div', { class: 'tiles' }, cells),
-    vals.length ? h('div', { class: 'scale' }, h('span', null, 'меньше'), h('div', { class: 'bar' }), h('span', null, 'больше')) : null);
+    vals.length ? h('div', { class: 'scale' }, h('span', null, 'меньше'), h('div', { class: `bar ${ramp === 'heat' ? 'heat' : ''}` }), h('span', null, 'больше')) : null);
 }

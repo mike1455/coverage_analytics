@@ -48,6 +48,40 @@ export const MATCH_LABEL = {
 
 const EXCLUDED_REASONS = new Set(['edc_not_actual', 'edc_not_residential']);
 
+// ---------- статус дома: обслуживается ли дом в ЕДЦ ----------
+// Главная классификация интерфейса: зелёный - обслуживаются все подъезды, розовый - часть подъездов,
+// красный - дом в ЕДЦ не обслуживается (его нет в выгрузке ЕДЦ или ни один подъезд не привязан).
+// Активность (заявки) показывается отдельными показателями, а не цветом статуса.
+
+export const HS_ORDER = ['full', 'partial', 'none', 'unknown', 'excluded'];
+
+export const HS_LABEL = {
+  full: 'Обслуживается в ЕДЦ',
+  partial: 'Обслуживается часть подъездов',
+  none: 'Не обслуживается в ЕДЦ',
+  unknown: 'Нет данных',
+  excluded: 'Неактуальный или нежилой',
+};
+
+export const HS_HINT = {
+  full: 'Дом найден в ЕДЦ, все известные подъезды привязаны к обслуживанию (или подъезды не указаны, но у дома есть настройка обслуживания).',
+  partial: 'Дом найден в ЕДЦ, к обслуживанию привязана только часть подъездов.',
+  none: 'Дома нет в выгрузке ЕДЦ (по УНОМ и ФИАС) или ни один его подъезд не привязан к обслуживанию.',
+  unknown: 'Выгрузки ЕДЦ не загружены, у дома несколько подходящих записей ЕДЦ или о нём мало данных.',
+  excluded: 'В ЕДЦ адрес помечен неактуальным или нежилым.',
+};
+
+/** Статус дома для карты, сводки и таблиц. */
+export function houseStatus(row) {
+  if (row.m === 'none' || row.m === 'override_none') return 'none';
+  if (row.m !== 'matched' || !row.e) return 'unknown';
+  if (row.cov === COV.excluded) return 'excluded';
+  if (row.cov === COV.full || row.cov === COV.partial || row.cov === COV.none) return row.cov;
+  return row.e.rel > 0 ? 'full' : 'unknown'; // подъезды неизвестны: решает настройка обслуживания дома
+}
+
+export const isServed = (s) => s === 'full' || s === 'partial';
+
 /**
  * Краткая сводка записи ЕДЦ для кэша сопоставления (таблицы, фильтры, KPI, экспорт).
  * Полную запись карточка дома запрашивает у worker отдельно, поэтому кэш остаётся компактным.
@@ -262,6 +296,8 @@ export function emptyKpi() {
     mkd: 0, matched: 0, conflict: 0, notMatched: 0, evaluated: 0, full: 0, partial: 0, none: 0,
     na: {}, excluded: 0, entrTotal: 0, entrLinked: 0, geo: 0, reqHouses: 0,
     req: { total: 0, closed: 0, open: 0, critical: 0, q1: 0, q2: 0, q3: 0, q4: 0 },
+    hs: { full: 0, partial: 0, none: 0, unknown: 0, excluded: 0 }, noEdc: 0, notInEdc: 0, servedActive: 0,
+    rc: { total: 0, open: 0, critical: 0, q1: 0, q2: 0, q3: 0, q4: 0 }, // заявки обслуживаемых домов
   };
 }
 
@@ -285,6 +321,16 @@ export function addToKpi(k, row, geoSet) {
     k.req.q1 += q[Q.q1]; k.req.q2 += q[Q.q2]; k.req.q3 += q[Q.q3]; k.req.q4 += q[Q.q4];
     if (q[Q.total] > 0) k.reqHouses++;
   }
+  const hs = houseStatus(row);
+  k.hs[hs]++;
+  if (row.m === 'no_edc') k.noEdc++;
+  if (row.m === 'none' || row.m === 'override_none') k.notInEdc++;
+  if (isServed(hs) && row.q) {
+    const q = row.q;
+    if (q[Q.total] > 0) k.servedActive++;
+    k.rc.total += q[Q.total]; k.rc.open += q[Q.open]; k.rc.critical += q[Q.critical];
+    k.rc.q1 += q[Q.q1]; k.rc.q2 += q[Q.q2]; k.rc.q3 += q[Q.q3]; k.rc.q4 += q[Q.q4];
+  }
   if (geoSet && geoSet.has(row.u)) k.geo++;
   return k;
 }
@@ -302,6 +348,12 @@ export function finalizeKpi(k) {
   k.evalCompleteness = k.mkd ? k.evaluated / k.mkd : null;
   k.geoShare = k.mkd ? k.geo / k.mkd : null;
   k.smallSample = k.evaluated < MIN_SAMPLE;
+  k.served = k.hs.full + k.hs.partial;
+  k.hasEdc = k.mkd > k.noEdc;
+  k.servedShare = k.hasEdc && k.mkd ? k.served / k.mkd : null;
+  k.notServedShare = k.hasEdc && k.mkd ? k.hs.none / k.mkd : null;
+  k.partialShare = k.hasEdc && k.mkd ? k.hs.partial / k.mkd : null;
+  k.activeShare = k.served ? k.servedActive / k.served : null;
   return k;
 }
 
@@ -326,49 +378,81 @@ function okrugOrder(code) {
   return i === -1 ? 99 : i;
 }
 
-export const RANK_METRICS = {
-  fullShare: {
-    label: '% домов с полной привязкой подъездов', short: '% полностью покрытых', pct: true, needsEdc: true,
-    num: (k) => k.full, den: (k) => k.evaluated, numLabel: 'полностью покрыто', denLabel: 'оценено домов',
-    note: 'По найденным привязкам ЕДЦ, не подтверждённое подключение. Знаменатель: оценённые дома.',
+/**
+ * Показатели для сводки, карты и таблиц. ramp: 'blue' - подключение, 'heat' - активность заявок.
+ * value(k, quarter) - значение для группы KPI; den - знаменатель (для «малой выборки» и подписей).
+ */
+export const METRICS = {
+  servedShare: {
+    label: 'Доля домов, обслуживаемых в ЕДЦ', short: '% обслуживается', fmt: 'pct', ramp: 'blue', needsEdc: true,
+    value: (k) => k.servedShare, num: (k) => k.served, den: (k) => k.mkd, numLabel: 'обслуживается', denLabel: 'домов МЖИ',
+    note: 'Обслуживается: дом найден в ЕДЦ и к обслуживанию привязаны все или часть его подъездов.',
+  },
+  notServed: {
+    label: 'Домов, не обслуживаемых в ЕДЦ', short: 'Не обслуживается', fmt: 'int', ramp: 'blue', needsEdc: true,
+    value: (k) => (k.hasEdc ? k.hs.none : null), den: (k) => k.mkd,
+    note: 'Дома реестра МЖИ, которых нет в выгрузке ЕДЦ, и дома, у которых ни один подъезд не привязан к обслуживанию.',
+  },
+  partialShare: {
+    label: 'Доля домов, где обслуживается часть подъездов', short: '% частично', fmt: 'pct', ramp: 'blue', needsEdc: true,
+    value: (k) => k.partialShare, num: (k) => k.hs.partial, den: (k) => k.mkd, numLabel: 'частично', denLabel: 'домов МЖИ',
+    note: 'Дом найден в ЕДЦ, но к обслуживанию привязана только часть подъездов.',
   },
   entrShare: {
-    label: '% подъездов с найденной привязкой', short: '% подъездов с привязкой', pct: true, needsEdc: true,
-    num: (k) => k.entrLinked, den: (k) => k.entrTotal, numLabel: 'подъездов с привязкой', denLabel: 'подъездов оценённых домов',
-    note: 'Уникальные подъезды оценённых домов, без строк-заглушек.',
+    label: 'Доля обслуживаемых подъездов', short: '% подъездов', fmt: 'pct', ramp: 'blue', needsEdc: true,
+    value: (k) => k.entrShare, num: (k) => k.entrLinked, den: (k) => k.entrTotal, numLabel: 'подъездов обслуживается', denLabel: 'подъездов',
+    note: 'Подъезды домов, найденных в ЕДЦ, с привязкой к обслуживанию. Строки-заглушки не учитываются.',
+  },
+  reqPerHouse: {
+    label: 'Заявок 2026 на один обслуживаемый дом', short: 'Заявок на дом', fmt: 'num1', ramp: 'heat', needsEdc: true, period: true,
+    value: (k, q) => (k.served ? (q ? k.rc[q] : k.rc.total) / k.served : null), den: (k) => k.served,
+    note: 'Заявки уровня «Дом» обслуживаемых домов, делённые на число обслуживаемых домов.',
+  },
+  activeShare: {
+    label: 'Доля обслуживаемых домов с заявками в 2026 году', short: '% домов с заявками', fmt: 'pct', ramp: 'heat', needsEdc: true,
+    value: (k) => k.activeShare, num: (k) => k.servedActive, den: (k) => k.served, numLabel: 'с заявками', denLabel: 'обслуживаемых домов',
+    note: 'Дом считается активным, если в 2026 году по нему была хотя бы одна заявка.',
   },
   requests: {
-    label: 'Заявок 2026 (домовой уровень)', short: 'Заявок 2026', pct: false, needsEdc: true,
-    note: 'Сумма агрегатов уровня «Дом» сопоставленных домов. 2026 год не завершён.',
+    label: 'Заявок 2026 (домовой уровень)', short: 'Заявок всего', fmt: 'int', ramp: 'heat', needsEdc: true, period: true,
+    value: (k, q) => (k.hasEdc ? (q ? k.req[q] : k.req.total) : null),
+    note: 'Сумма агрегатов уровня «Дом» (SQL № 4) сопоставленных домов. 2026 год не завершён.',
   },
-  requestsPer1000: {
-    label: 'Заявок 2026 на 1 000 сопоставленных МКД', short: 'Заявок на 1 000 МКД', pct: false, needsEdc: true,
-    note: 'Знаменатель: МКД МЖИ, сопоставленные с ЕДЦ.',
+  openPerHouse: {
+    label: 'Заявок без даты закрытия на один обслуживаемый дом', short: 'Открытых на дом', fmt: 'num2', ramp: 'heat', needsEdc: true,
+    value: (k) => (k.served ? k.rc.open / k.served : null), den: (k) => k.served,
+    note: 'Заявки 2026 года, у которых в ЕДЦ нет даты закрытия. Поквартальной разбивки нет.',
   },
-  matchRate: {
-    label: '% МКД МЖИ, сопоставленных с ЕДЦ', short: '% сопоставления', pct: true, needsEdc: true,
-    num: (k) => k.matched, den: (k) => k.mkd, numLabel: 'сопоставлено', denLabel: 'МКД МЖИ',
-    note: 'Полнота сопоставления, не подключение.',
+  criticalPerHouse: {
+    label: 'Критических заявок на один обслуживаемый дом', short: 'Критических на дом', fmt: 'num2', ramp: 'heat', needsEdc: true,
+    value: (k) => (k.served ? k.rc.critical / k.served : null), den: (k) => k.served,
+    note: 'Критические заявки 2026 года обслуживаемых домов. Поквартальной разбивки нет.',
   },
   mkd: {
-    label: 'МКД в реестре МЖИ (объём фонда)', short: 'МКД МЖИ', pct: false, needsEdc: false,
-    note: 'Это объём жилого фонда в файле МЖИ, а не рейтинг подключения.',
+    label: 'Домов в реестре МЖИ', short: 'Домов МЖИ', fmt: 'int', ramp: 'blue', needsEdc: false,
+    value: (k) => k.mkd,
+    note: 'Объём жилого фонда в файле МЖИ.',
+  },
+  fullShare: {
+    label: '% оценённых домов с привязкой всех подъездов', short: '% полностью', fmt: 'pct', ramp: 'blue', needsEdc: true, legacy: true,
+    value: (k) => k.fullShare, num: (k) => k.full, den: (k) => k.evaluated, numLabel: 'полностью', denLabel: 'оценено домов',
+    note: 'Знаменатель: дома, найденные в ЕДЦ, актуальные, жилые, с подъездами.',
   },
 };
+export const RANK_METRICS = METRICS;
+export const MAIN_METRICS = ['servedShare', 'notServed', 'entrShare', 'reqPerHouse', 'activeShare', 'requests', 'mkd'];
+export const ACTIVITY_METRICS = ['reqPerHouse', 'requests', 'activeShare', 'openPerHouse', 'criticalPerHouse'];
 
-export function rankValue(k, metric, reqMetric = 'total', quarter = '') {
-  switch (metric) {
-    case 'fullShare': return k.fullShare;
-    case 'entrShare': return k.entrShare;
-    case 'matchRate': return k.matchRate;
-    case 'mkd': return k.mkd;
-    case 'requests': return reqFromKpi(k, reqMetric, quarter);
-    case 'requestsPer1000': {
-      const v = reqFromKpi(k, reqMetric, quarter);
-      return v === null || !k.matched ? null : (v / k.matched) * 1000;
-    }
-    default: return null;
-  }
+export function metricValue(k, metric, quarter = '') {
+  const m = METRICS[metric];
+  if (!m) return null;
+  const v = m.value(k, m.period ? quarter : '');
+  return v === undefined || (typeof v === 'number' && !Number.isFinite(v)) ? null : v;
+}
+
+/** Совместимость: значение показателя для группы. */
+export function rankValue(k, metric, _reqMetric = 'total', quarter = '') {
+  return metricValue(k, metric, quarter);
 }
 
 export function reqFromKpi(k, metric = 'total', quarter = '') {
@@ -376,35 +460,83 @@ export function reqFromKpi(k, metric = 'total', quarter = '') {
   return k.req[metric];
 }
 
-/** Места в рейтинге: малые выборки и «нет данных» не ранжируются. */
+/** Мало домов в знаменателе: доля неустойчива, место не присваивается. */
+export function smallSampleFor(k, metric) {
+  const m = METRICS[metric];
+  return !!(m && m.den && m.fmt !== 'int' && m.den(k) < MIN_SAMPLE);
+}
+
+/** Места в рейтинге: малые выборки и «нет данных» не ранжируются. «Не обслуживается» ранжируется по возрастанию. */
 export function rankGroups(groups, metric, opts = {}) {
-  const needsSample = metric === 'fullShare' || metric === 'entrShare';
-  const vals = groups.map((g) => ({ g, v: rankValue(g, metric, opts.reqMetric, opts.quarter) }));
-  const rankable = vals.filter((x) => x.v !== null && x.v !== undefined && !(needsSample && x.g.smallSample) && x.g.key !== NO_OKRUG);
-  rankable.sort((a, b) => b.v - a.v);
+  const asc = metric === 'notServed';
+  const vals = groups.map((g) => ({ g, v: metricValue(g, metric, opts.quarter) }));
+  const rankable = vals.filter((x) => x.v !== null && x.v !== undefined && !smallSampleFor(x.g, metric) && x.g.key !== NO_OKRUG);
+  rankable.sort((a, b) => (asc ? a.v - b.v : b.v - a.v));
   const rank = new Map();
   rankable.forEach((x, i) => rank.set(x.g.key, i + 1));
-  return vals.map((x) => ({ ...x.g, value: x.v, rank: rank.get(x.g.key) || null }));
+  return vals.map((x) => ({ ...x.g, value: x.v, rank: rank.get(x.g.key) || null, small: smallSampleFor(x.g, metric) }));
 }
 
-/** Точки тепловой карты: только домовой уровень и только дома с проверенной/сохранённой геопозицией. */
-export function heatPoints(rows, geo, metric = 'total', quarter = '', { onlyVerified = false } = {}) {
-  const pts = [];
-  let withReq = 0;
-  let geoWithReq = 0;
+/** Границы классов по квантилям (для заливки районов и сетки): до n классов, повторы схлопываются. */
+export function quantileBreaks(values, n = 5) {
+  const v = values.filter(Number.isFinite).sort((a, b) => a - b);
+  const out = [];
+  for (let i = 1; i < n; i++) {
+    const b = v[Math.floor((i * v.length) / n)];
+    if (b !== undefined && b > v[0] && (!out.length || b > out[out.length - 1])) out.push(b);
+  }
+  return out;
+}
+
+/** Номер класса значения по границам quantileBreaks. */
+export function classOf(v, breaks) {
+  let i = 0;
+  while (i < breaks.length && v >= breaks[i]) i++;
+  return i;
+}
+
+// ---------- сетка шестиугольников по домам с координатами ----------
+const LAT0 = 55.75;
+const MX = Math.cos((LAT0 * Math.PI) / 180) * 111320; // метров в градусе долготы
+const MY = 110540; // метров в градусе широты
+
+/**
+ * Дома с координатами, собранные в шестиугольники со стороной size метров. Для каждой ячейки считаются
+ * те же KPI, что для района, поэтому сетка показывает любые показатели (заявок на дом, доля подключённых...).
+ * @returns {{cells: {key, lat, lon, ring: [lat, lon][], k}[], geoRows: number}}
+ */
+export function hexCells(rows, geo, size = 600) {
+  const w = Math.sqrt(3) * size;
+  const cells = new Map();
+  let geoRows = 0;
   for (const r of rows) {
-    const v = reqValue(r, metric, quarter);
-    if (!v) continue;
-    withReq++;
     const g = geo.get(r.u);
     if (!g || !Number.isFinite(g.lat) || !Number.isFinite(g.lon)) continue;
-    if (onlyVerified && g.status !== 'verified' && g.status !== 'manual') continue;
-    geoWithReq++;
-    pts.push({ lat: g.lat, lon: g.lon, v, u: r.u });
+    geoRows++;
+    const x = (g.lon - 37.6) * MX;
+    const y = (g.lat - LAT0) * MY;
+    // осевые координаты шестиугольника с острой вершиной вверх и округление до ближайшей ячейки
+    const qf = (x * Math.sqrt(3) / 3 - y / 3) / size;
+    const rf = (y * 2 / 3) / size;
+    let q = Math.round(qf); let rr = Math.round(rf); const s3 = Math.round(-qf - rf);
+    const dq = Math.abs(q - qf); const dr = Math.abs(rr - rf); const ds = Math.abs(s3 + qf + rf);
+    if (dq > dr && dq > ds) q = -rr - s3; else if (dr > ds) rr = -q - s3;
+    const key = `${q},${rr}`;
+    let c = cells.get(key);
+    if (!c) {
+      const cx = w * (q + rr / 2);
+      const cy = 1.5 * size * rr;
+      const ring = [];
+      for (let i = 0; i < 6; i++) {
+        const a = (Math.PI / 180) * (60 * i - 30);
+        ring.push([LAT0 + (cy + size * Math.sin(a)) / MY, 37.6 + (cx + size * Math.cos(a)) / MX]);
+      }
+      c = { key, lat: LAT0 + cy / MY, lon: 37.6 + cx / MX, ring, k: emptyKpi() };
+      cells.set(key, c);
+    }
+    addToKpi(c.k, r);
   }
-  return { pts, withReq, geoWithReq };
-}
-
-export function displayCategory(row) {
-  return row.cov;
+  const out = [...cells.values()];
+  for (const c of out) finalizeKpi(c.k);
+  return { cells: out, geoRows };
 }

@@ -8,6 +8,7 @@
 import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, copyFileSync, mkdtempSync, rmSync, rmdirSync, existsSync } from 'node:fs';
+import { unzipSync, strFromU8 } from '../../vendor/fflate/fflate.esm.js';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -353,37 +354,65 @@ function prepareSourceFolder() {
     await page.evaluate(() => window.__app.map.focus(window.__app.state.geo.keys().next().value));
     await page.waitForTimeout(500);
     await page.screenshot({ path: join(OUT, '04_map_zoom.png') });
-    await page.click('.nav-item[data-view="heat"]');
-    await page.waitForTimeout(800);
-    await page.screenshot({ path: join(OUT, '05_heat.png') });
-    await page.click('.nav-item[data-view="rating"]');
-    await page.waitForTimeout(500);
-    await page.screenshot({ path: join(OUT, '06_rating.png'), fullPage: true });
-    // Фильтры и сортировка таблицы округов: условие по проценту, сортировка по клику на заголовок
+    // Сводка: картинка по всей Москве, переключение цвета, PNG и Excel
+    await page.click('.nav-item[data-view="summary"]');
+    await page.waitForSelector('#view-summary svg.poster');
+    assert.equal(await page.locator('#view-summary svg.poster g[role="button"]').count(), 12, 'на картинке 12 округов');
+    await page.screenshot({ path: join(OUT, '05_summary.png'), fullPage: true });
+    await page.click('#view-summary .summary-bar button:has-text("Заявок на дом")');
+    await page.waitForSelector('#view-summary svg.poster');
+    await page.screenshot({ path: join(OUT, '05a_summary_activity.png'), fullPage: true });
+    await page.click('.topbar button[aria-label="Сменить тему"]');
+    await page.waitForSelector('#view-summary svg.poster');
+    await page.screenshot({ path: join(OUT, '05d_summary_dark.png'), fullPage: true });
+    await page.click('.topbar button[aria-label="Сменить тему"]');
     {
-      const okr = page.locator('#view-rating .card:has(h3:has-text("Округа: числители")) table');
+      const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#view-summary button:has-text("Скачать картинку")')]);
+      const png = readFileSync(await dl.path());
+      assert.ok(png.length > 50000 && png.slice(1, 4).toString() === 'PNG', 'картинка сохраняется в PNG');
+      writeFileSync(join(OUT, '05b_summary_export.png'), png);
+      const [dx] = await Promise.all([page.waitForEvent('download'), page.click('#view-summary button:has-text("Выгрузить всё в Excel")')]);
+      const xlsx = readFileSync(await dx.path());
+      const files = unzipSync(new Uint8Array(xlsx));
+      const sheets = [...strFromU8(files['xl/workbook.xml']).matchAll(/<sheet name="([^"]*)"/g)].map((m) => m[1]);
+      assert.deepEqual(sheets, ['Сводка', 'Округа', 'Районы', 'Дома']);
+      const houseRows = (strFromU8(files['xl/worksheets/sheet4.xml']).match(/<row /g) || []).length;
+      assert.equal(houseRows, k.mkd + 1, 'в листе «Дома» все дома реестра');
+      writeFileSync(join(OUT, 'export.xlsx'), xlsx);
+      log(`сводка: картинка ${png.length} байт, Excel ${xlsx.length} байт, листы ${sheets.join(', ')}`);
+    }
+    await page.click('.nav-item[data-view="activity"]');
+    await page.waitForTimeout(800);
+    await page.screenshot({ path: join(OUT, '05c_activity.png') });
+    await page.click('.nav-item[data-view="regions"]');
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: join(OUT, '06_regions.png'), fullPage: true });
+    // Фильтры и сортировка таблицы округов: условие по числу, сортировка по клику на заголовок
+    {
+      const card = page.locator('#view-regions .card:has(h3:text-is("Округа"))');
+      const okr = card.locator('table');
       const mkdCol = async () => (await okr.locator('tbody tr td:nth-child(3)').allInnerTexts()).map((x) => Number(x.replace(/\D/g, '')));
       const before = await mkdCol();
       const total = before.length;
-      await okr.locator('input[aria-label="Фильтр: МКД МЖИ"]').fill('>10');
+      await okr.locator('input[aria-label="Фильтр: Домов МЖИ"]').fill('>10');
       await page.waitForTimeout(300);
       const big = (await mkdCol()).length;
-      assert.ok(big > 0 && big < total, 'есть округа с числом МКД больше и меньше 10');
-      assert.equal(big, before.filter((v) => v > 10).length, 'фильтр «>10» по числу МКД');
-      await okr.locator('input[aria-label="Фильтр: МКД МЖИ"]').fill('больше');
+      assert.ok(big > 0 && big < total, 'есть округа с числом домов больше и меньше 10');
+      assert.equal(big, before.filter((v) => v > 10).length, 'фильтр «>10» по числу домов');
+      await okr.locator('input[aria-label="Фильтр: Домов МЖИ"]').fill('больше');
       await page.waitForTimeout(300);
       assert.equal(await okr.locator('input.bad').count(), 1, 'непонятное условие подсвечивается');
-      await page.click('#view-rating button:has-text("Сбросить фильтры")');
+      await card.locator('button:has-text("Сбросить фильтры")').click();
       await page.waitForTimeout(300);
       assert.equal(await okr.locator('tbody tr').count(), total, 'сброс фильтров');
-      await okr.locator('th.sortable:has-text("МКД МЖИ")').click();
+      await okr.locator('th.sortable:has-text("Домов МЖИ")').click();
       const vals = await mkdCol();
-      assert.deepEqual(vals, [...vals].sort((a, b) => b - a), 'сортировка по убыванию МКД');
+      assert.deepEqual(vals, [...vals].sort((a, b) => b - a), 'сортировка по убыванию числа домов');
       await okr.locator('input[aria-label="Фильтр: Округ"]').fill('зао');
-      await okr.locator('input[aria-label="Фильтр: % полностью"]').fill('>30');
+      await okr.locator('input[aria-label="Фильтр: % обслуживается"]').fill('>30');
       await page.waitForTimeout(300);
-      await page.locator('#view-rating .card:has(h3:has-text("Округа: числители"))').screenshot({ path: join(OUT, '06a_rating_filters.png') });
-      await page.click('#view-rating button:has-text("Сбросить фильтры")');
+      await card.screenshot({ path: join(OUT, '06a_regions_filters.png') });
+      await card.locator('button:has-text("Сбросить фильтры")').click();
       log(`таблица округов: ${total} строк, фильтр «>10» оставил ${big}, сортировка и сброс работают`);
     }
     await page.click('.nav-item[data-view="houses"]');
@@ -517,6 +546,16 @@ function prepareSourceFolder() {
       await page.evaluate(() => { window.__app.map.map.setView([55.75, 37.6], 9); });
       await page.waitForTimeout(800);
       await page.screenshot({ path: join(OUT, '12_map_boundaries.png') });
+      await page.click('.nav-item[data-view="activity"]');
+      await page.click('#view-activity .seg button:has-text("Районы")');
+      await page.evaluate(() => { window.__app.map.map.setView([55.75, 37.6], 9); });
+      await page.waitForTimeout(800);
+      await page.screenshot({ path: join(OUT, '13_activity_districts.png') });
+      await page.click('#view-activity .seg button:has-text("Сетка 600 м")');
+      await page.evaluate(() => { window.__app.map.map.setView([55.72, 37.5], 10); });
+      await page.waitForTimeout(800);
+      await page.screenshot({ path: join(OUT, '14_activity_hex.png') });
+      assert.ok(await page.evaluate(() => window.__app.map.groups.hex.getLayers().length) > 0, 'сетка активности нарисована');
       log(`границы: округов ${b.okrug}, районов ${b.area}, все сопоставлены с МЖИ`);
     } else {
       log('границы: файлы в data/local/osm уже есть, проверка пропущена');

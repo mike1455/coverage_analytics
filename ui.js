@@ -46,10 +46,18 @@ export const na = () => h('span', { class: 'na' }, NA);
 
 const nf = new Intl.NumberFormat('ru-RU');
 const nf1 = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const nf2 = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export const fmt = {
   int: (n) => (n === null || n === undefined || Number.isNaN(n) ? NA : nf.format(Math.round(n))),
   num1: (n) => (n === null || n === undefined || Number.isNaN(n) ? NA : nf1.format(n)),
+  num2: (n) => (n === null || n === undefined || Number.isNaN(n) ? NA : nf2.format(n)),
+  /** Крупные числа коротко: 4 667 431 → «4,67 млн». */
+  big: (n) => {
+    if (n === null || n === undefined || Number.isNaN(n)) return NA;
+    if (Math.abs(n) >= 1e6) return `${nf2.format(n / 1e6)} млн`;
+    return nf.format(Math.round(n));
+  },
   pct: (x, digits = 1) => {
     if (x === null || x === undefined || Number.isNaN(x)) return NA;
     return new Intl.NumberFormat('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(x * 100) + '%';
@@ -112,6 +120,8 @@ const ICONS = {
   database: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',
   trash: 'M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3',
   list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
+  grid: 'M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z',
+  activity: 'M3 12h4l3 8 4-16 3 8h4',
 };
 
 export function icon(name, size = 18, cls = '') {

@@ -1,11 +1,11 @@
-// Карта (Leaflet): подложки, хороплет округов/районов, дома с геопозицией, контуры зданий, зоны подъездов,
-// тепловой слой заявок (Leaflet.heat) и инструменты ручной разметки (Leaflet-Geoman).
+// Карта (Leaflet): подложки, заливка округов и районов по показателю, дома с геопозицией в цветах статуса,
+// контуры зданий, зоны подъездов, сетка шестиугольников активности и ручная разметка (Leaflet-Geoman).
 // На карту попадают ТОЛЬКО дома с сохранённой геопозицией - без случайных или «примерных» точек.
 
-import { h, clear, fmt, NA, icon, STATUS } from './ui.js';
-import { COV, COV_LABEL, heatPoints, REQ_METRICS, QUARTERS } from './analytics.js';
+import { h, clear, fmt, NA, icon } from './ui.js';
+import { houseStatus, HS_LABEL, HS_ORDER, metricValue, METRICS, quantileBreaks, classOf } from './analytics.js';
 import { okrugByCode } from './core/okrugs.js';
-import { seqColorResolved } from './charts.js';
+import { rampResolved, rampSteps, fmtMetric, cssVar, HS_ICON } from './charts.js';
 import { basemapState, basemapShort, onBasemap, startBasemapDownload } from './basemap.js';
 
 const L = window.L;
@@ -21,15 +21,38 @@ export const BASEMAPS = {
 };
 
 const COLORS = () => {
-  const cs = getComputedStyle(document.documentElement);
-  const v = (n) => cs.getPropertyValue(n).trim();
+  const v = cssVar;
   return {
-    full: v('--st-good'), partial: v('--st-serious'), none: v('--st-critical'), na: v('--st-unknown'), excluded: v('--st-excluded'),
+    full: v('--hs-full'), partial: v('--hs-partial'), none: v('--hs-none'), unknown: v('--hs-unknown'), excluded: v('--hs-excluded'),
     surface: v('--surface'), ink: v('--ink'), accent: v('--accent'), muted: v('--muted'),
   };
 };
 
-const HEAT_GRADIENT = { 0.15: '#fde4d6', 0.35: '#f7b48f', 0.55: '#ec835a', 0.75: '#d95926', 1.0: '#9c3413' };
+/**
+ * Шкала цвета для заливки: доли - линейно от минимума до максимума, остальное - по квантилям (5 классов),
+ * чтобы несколько очень больших значений не делали всё остальное одинаково светлым.
+ */
+export function colorScale(values, metric, ramp) {
+  const vals = values.filter(Number.isFinite);
+  if (!vals.length) return { t: () => null, legend: [], ramp };
+  if ((METRICS[metric] || {}).fmt === 'pct') {
+    const lo = Math.min(...vals); const hi = Math.max(...vals);
+    return {
+      ramp, kind: 'linear', lo, hi,
+      t: (v) => (Number.isFinite(v) ? (hi > lo ? (v - lo) / (hi - lo) : 0.5) : null),
+      legend: [{ t: 0, label: fmtMetric(metric, lo) }, { t: 1, label: fmtMetric(metric, hi) }],
+    };
+  }
+  const br = quantileBreaks(vals, 5);
+  const n = br.length;
+  const lo = Math.min(...vals); const hi = Math.max(...vals);
+  const edges = [lo, ...br, hi];
+  return {
+    ramp, kind: 'quantile', breaks: br,
+    t: (v) => (Number.isFinite(v) ? (n ? classOf(v, br) / n : 0.5) : null),
+    legend: edges.slice(0, -1).map((a, i) => ({ t: n ? i / n : 0.5, label: `${fmtMetric(metric, a)} - ${fmtMetric(metric, edges[i + 1])}` })),
+  };
+}
 
 export class MapView {
   constructor({ onHouse, onOkrug, onArea }) {
@@ -38,10 +61,18 @@ export class MapView {
     this.shell = h('div', { class: 'map-shell' }, this.el);
     this.map = null;
     this.mode = 'coverage';
-    this.layerOn = { okrug: true, area: false, houses: true, buildings: true, zones: true, excluded: false };
+    // Слои помнятся отдельно для карты домов и карты активности
+    this.layerSets = {
+      coverage: { okrug: true, area: false, houses: true, buildings: true, zones: true, excluded: false, hex: false },
+      activity: { okrug: true, area: true, hex: false },
+    };
     this.pmtiles = { available: false, rangeOk: false, checked: false };
     try { this.basemapId = localStorage.getItem('mca-basemap') || ''; } catch (_) { this.basemapId = ''; }
     onBasemap(() => this._renderControls());
+  }
+
+  get layerOn() {
+    return this.layerSets[this.mode] || this.layerSets.coverage;
   }
 
   mount(parent) {
@@ -64,6 +95,7 @@ export class MapView {
       zones: L.layerGroup().addTo(this.map),
       houses: L.layerGroup().addTo(this.map),
       excluded: L.layerGroup(),
+      hex: L.layerGroup().addTo(this.map),
       focus: L.layerGroup().addTo(this.map),
     };
     this.controls = h('div', { class: 'map-controls' });
@@ -127,13 +159,13 @@ export class MapView {
     this._renderControls();
   }
 
-  /** Полное обновление слоёв. ctx: {rows, geo, zones, boundaries, okrugKpi, areaKpi, choro, filters, heat} */
+  /** Полное обновление слоёв. ctx: {rows, geo, zones, boundaries, okrugKpi, areaKpi, choro, filters, hex} */
   update(ctx) {
     if (!this.map) return;
     this.ctx = ctx;
     this._renderChoropleth();
     this._renderHouses();
-    this._renderHeat();
+    this._renderHex();
     this._renderLegend();
     this._renderControls();
     this._renderOverlay();
@@ -144,28 +176,29 @@ export class MapView {
     if (this.ctx) this.update(this.ctx);
   }
 
-  // ---------- хороплет округов и районов ----------
+  // ---------- заливка округов и районов ----------
   _renderChoropleth() {
     const { boundaries, okrugKpi, areaKpi, choro, filters } = this.ctx;
     this.groups.okrug.clearLayers();
     this.groups.area.clearLayers();
+    this.scales = {};
     const c = COLORS();
-    const paint = (layerGroup, fc, keyProp, kpiMap, onClick, kind) => {
+    const hexOn = this.mode === 'activity' && this.layerOn.hex;
+    const paint = (layerGroup, fc, keyProp, kpiMap, onClick, kind, filled) => {
       if (!fc) return;
-      const vals = [...kpiMap.values()].map((k) => choro.value(k)).filter(Number.isFinite);
-      const lo = Math.min(...vals); const hi = Math.max(...vals);
-      const heat = this.mode === 'heat';
+      const scale = colorScale([...kpiMap.values()].map((k) => choro.value(k)), choro.id, choro.ramp);
+      if (filled) this.scales[kind] = scale;
       L.geoJSON(fc, {
         renderer: this.renderer,
         style: (f) => {
           const key = f.properties[keyProp];
           const k = kpiMap.get(key);
-          const v = k ? choro.value(k) : null;
-          const t = Number.isFinite(v) ? (hi > lo ? (v - lo) / (hi - lo) : 0.5) : null;
+          const t = k ? scale.t(choro.value(k)) : null;
           const sel = (kind === 'okrug' && filters.okrug === key) || (kind === 'area' && filters.area === key);
+          const fill = filled && t !== null;
           return {
-            color: sel ? c.ink : c.muted, weight: sel ? 2.5 : kind === 'okrug' ? 1.2 : 0.7, opacity: 0.9,
-            fillColor: t === null || heat ? c.muted : seqColorResolved(t), fillOpacity: heat ? 0.03 : t === null ? 0.05 : 0.42,
+            color: sel ? c.ink : c.muted, weight: sel ? 2.5 : kind === 'okrug' ? 1.4 : 0.7, opacity: 0.9,
+            fillColor: fill ? rampResolved(scale.ramp, t) : c.muted, fillOpacity: fill ? (this.mode === 'activity' ? 0.62 : 0.45) : 0.03,
             dashArray: key ? null : '3 3',
           };
         },
@@ -183,18 +216,20 @@ export class MapView {
         },
       }).addTo(layerGroup);
     };
-    if (this.layerOn.okrug && boundaries.okrug) paint(this.groups.okrug, boundaries.okrug.geojson, '_okrug', okrugKpi, this.cb.onOkrug, 'okrug');
-    if (this.layerOn.area && boundaries.area) paint(this.groups.area, boundaries.area.geojson, '_area', areaKpi, this.cb.onArea, 'area');
+    // Если включены районы, округа остаются контуром, а заливка идёт по районам
+    const areaOn = this.layerOn.area && boundaries.area;
+    if (this.layerOn.okrug && boundaries.okrug) paint(this.groups.okrug, boundaries.okrug.geojson, '_okrug', okrugKpi, this.cb.onOkrug, 'okrug', !areaOn && !hexOn);
+    if (areaOn) paint(this.groups.area, boundaries.area.geojson, '_area', areaKpi, this.cb.onArea, 'area', !hexOn);
   }
 
   // ---------- дома ----------
   _renderHouses() {
     const { rows, geo, zones } = this.ctx;
     for (const g of ['houses', 'buildings', 'zones', 'excluded']) this.groups[g].clearLayers();
-    if (this.mode === 'heat') { this.map.removeLayer(this.groups.excluded); return; }
+    this.counts = {};
+    if (this.mode === 'activity') { this.map.removeLayer(this.groups.excluded); return; }
     const c = COLORS();
     let n = 0;
-    this.counts = { full: 0, partial: 0, none: 0, na: 0, excluded: 0 };
     // Когда домов на карте тысячи, точки мельче, чтобы город не превращался в сплошное пятно
     let nGeo = 0;
     for (const r of rows) if (geo.has(r.u)) nGeo++;
@@ -204,23 +239,25 @@ export class MapView {
       const g = geo.get(r.u);
       if (!g) continue;
       n++;
-      const cov = r.cov || COV.na;
-      this.counts[cov] = (this.counts[cov] || 0) + 1;
-      const target = cov === COV.excluded ? this.groups.excluded : this.groups.houses;
-      const color = c[cov] || c.na;
+      const st = houseStatus(r);
+      this.counts[st] = (this.counts[st] || 0) + 1;
+      const target = st === 'excluded' ? this.groups.excluded : this.groups.houses;
+      const color = c[st] || c.unknown;
       if (g.building && this.layerOn.buildings) {
         L.geoJSON(g.building, {
           renderer: this.renderer,
-          style: { color, weight: 1.5, fillColor: color, fillOpacity: 0.35, dashArray: cov === COV.excluded ? '4 3' : null },
+          style: { color, weight: 1.5, fillColor: color, fillOpacity: 0.35, dashArray: st === 'excluded' ? '4 3' : null },
         }).on('click', () => this.cb.onHouse(r.u)).bindTooltip(r.address, { sticky: true })
-          .addTo(cov === COV.excluded ? this.groups.excluded : this.groups.buildings);
+          .addTo(st === 'excluded' ? this.groups.excluded : this.groups.buildings);
       }
       if (this.layerOn.houses) {
         L.circleMarker([g.lat, g.lon], {
           renderer: this.renderer, radius, weight, color: c.surface, fillColor: color, fillOpacity: 1,
-          dashArray: cov === COV.excluded ? '2 2' : null,
+          dashArray: st === 'excluded' ? '2 2' : null,
         }).on('click', () => this.cb.onHouse(r.u))
-          .bindTooltip(() => h('div', null, h('b', null, r.address), h('div', null, STATUS[cov].label),
+          .bindTooltip(() => h('div', null, h('b', null, r.address), h('div', null, HS_LABEL[st]),
+            r.e && r.e.et ? h('div', { class: 'muted' }, `Подъездов обслуживается: ${fmt.int(Math.min(r.e.el, r.e.et))} из ${fmt.int(r.e.et)}`) : null,
+            r.q ? h('div', { class: 'muted' }, `Заявок 2026: ${fmt.int(r.q[0])}`) : null,
             g.status === 'verified' || g.status === 'manual' ? null : h('div', { class: 'muted' }, `Геопозиция: ${g.accuracy || 'не проверена'}`)), { direction: 'top', offset: [0, -6] })
           .addTo(target);
       }
@@ -240,53 +277,78 @@ export class MapView {
     this.geoShown = n;
   }
 
-  // ---------- тепловая карта ----------
-  _renderHeat() {
-    if (this.heat) { this.map.removeLayer(this.heat); this.heat = null; }
-    this.heatInfo = null;
-    if (this.mode !== 'heat') return;
-    const { rows, geo, heat } = this.ctx;
-    const res = heatPoints(rows, geo, heat.metric, heat.quarter, { onlyVerified: heat.onlyVerified });
-    this.heatInfo = res;
-    if (!res.pts.length || !L.heatLayer) return;
-    const maxV = Math.max(...res.pts.map((p) => p.v));
-    const w = (v) => (heat.log ? Math.log1p(v) / Math.log1p(maxV) : v / maxV);
-    this.heat = L.heatLayer(res.pts.map((p) => [p.lat, p.lon, w(p.v)]), {
-      radius: heat.radius || 24, blur: 18, maxZoom: 15, max: 1, minOpacity: 0.25, gradient: HEAT_GRADIENT,
-    }).addTo(this.map);
-    // Невидимые маркеры поверх тепла - чтобы клик открывал карточку с исходными числами
-    for (const p of res.pts) {
-      L.circleMarker([p.lat, p.lon], { renderer: this.renderer, radius: 7, opacity: 0, fillOpacity: 0 })
-        .bindTooltip(() => {
-          const r = rows.find((x) => x.u === p.u);
-          return h('div', null, h('b', null, r ? r.address : p.u), h('div', null, `${REQ_METRICS[heat.metric].label}${heat.quarter ? `, ${QUARTERS[heat.quarter]}` : ''}: `, h('b', null, fmt.int(p.v))));
-        }, { direction: 'top' })
-        .on('click', () => this.cb.onHouse(p.u)).addTo(this.groups.houses);
+  // ---------- сетка шестиугольников (активность по домам с координатами) ----------
+  _renderHex() {
+    this.groups.hex.clearLayers();
+    this.hexScale = null;
+    const hx = this.ctx.hex;
+    if (this.mode !== 'activity' || !this.layerOn.hex || !hx || !hx.cells.length) return;
+    const { choro } = this.ctx;
+    const c = COLORS();
+    const scale = colorScale(hx.cells.map((cell) => choro.value(cell.k)), choro.id, choro.ramp);
+    this.hexScale = scale;
+    for (const cell of hx.cells) {
+      const v = choro.value(cell.k);
+      const t = scale.t(v);
+      L.polygon(cell.ring, {
+        renderer: this.renderer, color: c.surface, weight: 1, opacity: 0.9,
+        fillColor: t === null ? c.muted : rampResolved(scale.ramp, t), fillOpacity: t === null ? 0.15 : 0.82,
+      }).bindTooltip(() => h('div', null,
+        h('div', null, `${choro.label}: `, h('b', null, choro.text(cell.k))),
+        h('div', { class: 'muted' }, `Домов с координатами в ячейке: ${fmt.int(cell.k.mkd)}, обслуживаются ${fmt.int(cell.k.served)}`),
+        h('div', { class: 'muted' }, `Заявок 2026: ${fmt.int(cell.k.req.total)}`),
+        h('div', { class: 'muted' }, 'Клик приближает ячейку')), { sticky: true })
+        .on('click', () => this.map.setView([cell.lat, cell.lon], Math.max(this.map.getZoom() + 2, 14)))
+        .addTo(this.groups.hex);
     }
   }
 
   // ---------- легенда ----------
+  _scaleLegend(title, scale, foot) {
+    const el = this.legendEl;
+    el.append(h('h4', null, title));
+    if (scale.kind === 'linear') {
+      el.append(h('div', { class: 'lg-ramp' }, rampSteps(scale.ramp).map((st) => h('i', { style: { background: st.color } }))),
+        h('div', { class: 'heat-scale-l' }, h('span', null, scale.legend[0].label), h('span', null, scale.legend[1].label)));
+    } else {
+      for (const it of scale.legend) {
+        el.append(h('div', { class: 'lg-row' }, h('i', { class: 'sw sq', style: { background: rampResolved(scale.ramp, it.t) } }), it.label));
+      }
+    }
+    if (foot) el.append(h('div', { class: 'lg-foot' }, foot));
+  }
+
   _renderLegend() {
     const el = this.legendEl;
     clear(el);
-    if (this.mode === 'heat') {
-      const info = this.heatInfo || { pts: [], withReq: 0 };
-      el.append(
-        h('h4', null, 'Концентрация заявок (домовой уровень)'),
-        h('div', { class: 'heat-scale', style: { background: `linear-gradient(90deg, ${Object.values(HEAT_GRADIENT).join(', ')})` } }),
-        h('div', { class: 'heat-scale-l' }, h('span', null, 'меньше'), h('span', null, 'больше')),
-        h('div', { class: 'lg-foot' }, `Тепловая карта по ${fmt.int(info.pts.length)} геокодированным домам из ${fmt.int(info.withReq)} домов с заявками. Не экстраполируется на всю Москву.`),
-      );
+    const { choro } = this.ctx;
+    if (this.mode === 'activity') {
+      const hx = this.ctx.hex;
+      if (this.layerOn.hex && this.hexScale) {
+        this._scaleLegend(`${choro.label}: ячейки 600 м`, this.hexScale,
+          `Только дома с координатами: ${fmt.int(hx.geoRows)} из ${fmt.int(this.ctx.rows.length)}. Ячейки без домов не рисуются.`);
+      } else if (this.scales.area || this.scales.okrug) {
+        this._scaleLegend(`${choro.label}: ${this.scales.area ? 'районы' : 'округа'}`, this.scales.area || this.scales.okrug,
+          'Считается по всем домам района, координаты не нужны. Классы по квантилям: в каждом примерно поровну районов.');
+      } else {
+        el.append(h('h4', null, choro.label), h('div', { class: 'lg-foot' }, 'Загрузите границы округов и районов или включите сетку по домам с координатами.'));
+      }
       return;
     }
     const counts = this.counts || {};
-    el.append(h('h4', null, 'Обслуживание по привязкам ЕДЦ'));
-    for (const k of ['full', 'partial', 'none', 'na', 'excluded']) {
+    el.append(h('h4', null, 'Дома на карте'));
+    for (const k of HS_ORDER) {
       if (k === 'excluded' && !this.layerOn.excluded) continue;
-      el.append(h('div', { class: 'lg-row' }, h('i', { class: 'sw', style: { background: `var(--st-${k === 'full' ? 'good' : k === 'partial' ? 'serious' : k === 'none' ? 'critical' : k === 'na' ? 'unknown' : 'excluded'})` } }),
-        icon(STATUS[k].icon, 14), COV_LABEL[k], h('span', { class: 'n' }, fmt.int(counts[k] || 0))));
+      if (!counts[k] && (k === 'unknown' || k === 'excluded')) continue;
+      el.append(h('div', { class: 'lg-row' }, h('i', { class: 'sw', style: { background: `var(--hs-${k})` } }),
+        icon(HS_ICON[k], 14), HS_LABEL[k], h('span', { class: 'n' }, fmt.int(counts[k] || 0))));
     }
-    el.append(h('div', { class: 'lg-foot' }, 'Найденная настройка обслуживания в ЕДЦ не означает подтверждённое подключение, а «нет привязки» не означает «отключён». На карте только дома с сохранённой геопозицией.'));
+    const sc = this.scales.area || this.scales.okrug;
+    if (sc) {
+      el.append(h('div', { class: 'lg-sep' }));
+      this._scaleLegend(`Заливка ${this.scales.area ? 'районов' : 'округов'}: ${choro.label}`, sc);
+    }
+    el.append(h('div', { class: 'lg-foot' }, 'На карте только дома с сохранённой геопозицией.'));
   }
 
   // ---------- переключатели ----------
@@ -310,15 +372,21 @@ export class MapView {
         ? h('div', { class: 'small', style: { marginTop: '6px', color: 'var(--danger-ink)' } }, 'Офлайн-карта не читается. Обновите её (раздел «Импорт и качество данных») или выберите онлайн-подложку.') : null,
       offlineHint);
     this.controls.append(base);
-    if (this.mode !== 'heat') {
-      const t = (key, label, disabled) => h('label', null, h('input', {
-        type: 'checkbox', checked: this.layerOn[key] && !disabled, disabled,
-        onchange: (e) => { this.layerOn[key] = e.target.checked; this.update(this.ctx); },
-      }), label);
-      const b = this.ctx ? this.ctx.boundaries : {};
+    const t = (key, label, disabled) => h('label', null, h('input', {
+      type: 'checkbox', checked: this.layerOn[key] && !disabled, disabled,
+      onchange: (e) => { this.layerOn[key] = e.target.checked; this.update(this.ctx); },
+    }), label);
+    const b = this.ctx ? this.ctx.boundaries : {};
+    if (this.mode === 'activity') {
       this.controls.append(h('div', { class: 'map-panel' },
         h('div', { class: 'ttl' }, 'Слои'),
-        t('okrug', 'Округа (заливка по показателю)', !b.okrug),
+        t('okrug', 'Округа', !b.okrug),
+        t('area', 'Районы (заливка)', !b.area),
+        t('hex', 'Сетка по домам с координатами')));
+    } else {
+      this.controls.append(h('div', { class: 'map-panel' },
+        h('div', { class: 'ttl' }, 'Слои'),
+        t('okrug', 'Округа', !b.okrug),
         t('area', 'Районы', !b.area),
         t('houses', 'Дома (точки)'),
         t('buildings', 'Контуры зданий'),

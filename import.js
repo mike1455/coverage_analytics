@@ -251,9 +251,10 @@ function kpiCmp(before, after) {
   const rows = [
     ['МКД МЖИ', (k) => fmt.int(k.mkd)],
     ['Сопоставлено с ЕДЦ', (k) => `${fmt.int(k.matched)} (${fmt.pct(k.matchRate)})`],
-    ['Оценено домов', (k) => fmt.int(k.evaluated)],
-    ['% полностью покрытых (привязки)', (k) => fmt.pct(k.fullShare)],
-    ['% подъездов с привязкой', (k) => fmt.pct(k.entrShare)],
+    ['Обслуживаются в ЕДЦ', (k) => (k.served !== undefined ? `${fmt.int(k.served)} (${fmt.pct(k.servedShare)})` : NA)],
+    ['Обслуживается часть подъездов', (k) => (k.hs && k.hs.partial !== undefined ? fmt.int(k.hs.partial) : NA)],
+    ['Не обслуживаются', (k) => (k.hs && k.hs.none !== undefined ? fmt.int(k.hs.none) : NA)],
+    ['% подъездов обслуживается', (k) => fmt.pct(k.entrShare)],
     ['Заявок 2026 (дом)', (k) => fmt.int(k.req.total)],
   ];
   return h('div', { class: 'cmp' }, h('div', { class: 'h' }, 'Показатель'), h('div', { class: 'h num' }, 'Сейчас'), h('div', { class: 'h num' }, 'После'),

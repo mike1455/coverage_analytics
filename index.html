@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Аналитика покрытия</title>
-  <meta name="description" content="Локальная аналитика покрытия по привязкам ЕДЦ, реестру МЖИ и заявкам 2026 года">
+  <meta name="description" content="Локальная аналитика: обслуживание домов Москвы в ЕДЦ по реестру МЖИ и заявки 2026 года">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232a78d6' stroke-width='6' stroke-dasharray='40 100'/%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%230ca30c' stroke-width='6' stroke-dasharray='0 42 30 100'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="vendor/geoman/leaflet-geoman.css">
@@ -24,9 +24,10 @@
           <div class="brand-sub">Москва, ЕДЦ, МЖИ</div>
         </div>
       </div>
-      <button class="nav-item" data-view="map"><span data-icon="map"></span><span class="label">Карта</span></button>
-      <button class="nav-item" data-view="heat"><span data-icon="flame"></span><span class="label">Тепловая карта заявок</span></button>
-      <button class="nav-item" data-view="rating"><span data-icon="chart"></span><span class="label">Рейтинг округов</span></button>
+      <button class="nav-item" data-view="summary"><span data-icon="grid"></span><span class="label">Сводка</span></button>
+      <button class="nav-item" data-view="map"><span data-icon="map"></span><span class="label">Карта домов</span></button>
+      <button class="nav-item" data-view="activity"><span data-icon="activity"></span><span class="label">Активность заявок</span></button>
+      <button class="nav-item" data-view="regions"><span data-icon="chart"></span><span class="label">Округа и районы</span></button>
       <button class="nav-item" data-view="houses"><span data-icon="building"></span><span class="label">Дома и подъезды</span></button>
       <div class="nav-sep"></div>
       <button class="nav-item" data-view="import"><span data-icon="database"></span><span class="label">Импорт и качество данных</span></button>
@@ -36,9 +37,10 @@
     <div class="main">
       <header class="topbar" id="topbar"></header>
       <div class="views" id="views">
-        <section class="view view-map" id="view-map" aria-label="Карта"></section>
-        <section class="view view-heat" id="view-heat" aria-label="Тепловая карта заявок"></section>
-        <section class="view" id="view-rating" aria-label="Рейтинг округов"></section>
+        <section class="view" id="view-summary" aria-label="Сводка"></section>
+        <section class="view view-map" id="view-map" aria-label="Карта домов"></section>
+        <section class="view view-activity" id="view-activity" aria-label="Активность заявок"></section>
+        <section class="view" id="view-regions" aria-label="Округа и районы"></section>
         <section class="view" id="view-houses" aria-label="Дома и подъезды"></section>
         <section class="view" id="view-import" aria-label="Импорт и качество данных"></section>
       </div>
@@ -61,7 +63,6 @@
   </script>
 
   <script src="vendor/leaflet/leaflet.js"></script>
-  <script src="vendor/leaflet-heat/leaflet-heat.js"></script>
   <script src="vendor/geoman/leaflet-geoman.min.js"></script>
   <script src="vendor/protomaps/protomaps-leaflet.js"></script>
   <script src="vendor/osmtogeojson/osmtogeojson.js"></script>
