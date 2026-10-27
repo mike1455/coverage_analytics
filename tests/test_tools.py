@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """Тесты Python-инструментов (стандартная библиотека): py -3 -m unittest discover -s tests -p "test_*.py" """
+import contextlib
 import csv
 import datetime as dt
 import filecmp
 import http.server
 import importlib.util
+import io
 import json
 import os
+import re
 import socketserver
 import subprocess
 import sys
@@ -1119,6 +1122,158 @@ class MosRegistry(unittest.TestCase):
         self.assertEqual(prog.snapshot()["state"], "error")
         self.assertIn("ключ", prog.snapshot()["message"])
         self.assertEqual(json.loads(self.out.read_text(encoding="utf-8")), {"old": 1})
+
+
+AM = load("addrmatch_py", ROOT / "tools" / "addrmatch.py")
+GF = load("geocode_file_mod", ROOT / "tools" / "geocode_file.py")
+
+
+class AddrMatchPython(unittest.TestCase):
+    """Python-версия сопоставления адресов совпадает с core/addrmatch.js (те же примеры, что в addrmatch.test.mjs)."""
+
+    def test_parse(self):
+        cases = [
+            ("Лескова ул., д.5", "лескова улица", ["5"]),
+            ("Хорошевское шоссе, д.76, к.4", "хорошевское шоссе", ["76к4"]),
+            ("Басманный 1-й пер., д.5/20,  стр.1", "1 басманный переулок", ["5/20с1"]),
+            ("Бочвара Академика ул., д.5, к.2", "академика бочвара улица", ["5к2"]),
+            ("Зеленоград, к.418", "зеленоград", ["418", "к418"]),
+            ("Российская Федерация, город Москва, внутригородская территория муниципальный округ Якиманка, Софийская набережная, дом 24/2, строение 2", "набережная софийская", ["24/2с2"]),
+            ("Ватутинская 3-я ул. д. 6", "3 ватутинская улица", ["6"]),
+            ("Тихая ул., д.4, к.А", "тихая улица", ["4ка", "4а"]),
+        ]
+        for addr, bag, keys in cases:
+            street, _, k = AM.parse_address(addr)
+            self.assertEqual((AM.street_bag(street), k), (bag, keys), addr)
+
+    def test_match(self):
+        osm = [
+            ["w", "улица Лескова", "5", "", "", 55.889, 37.593],
+            ["w", "улица Чехова", "4", "", "Щербинка", 55.503, 37.564],
+            ["w", "улица Чехова", "4", "", "Троицк", 55.485, 37.305],
+            ["w", "", "7", "", "посёлок Газопровод", 55.58, 37.48],
+            ["w", "улица Газопровод", "7", "", "", 55.63, 37.55],
+        ]
+        idx = AM.build_index(osm)
+        self.assertEqual(AM.match_address(idx, "Лескова ул., д.5")["lat"], 55.889)
+        self.assertEqual(AM.match_address(idx, "Чехова ул. (Щербинка г.), д.4")["lat"], 55.503)
+        self.assertEqual(AM.match_address(idx, "Чехова ул., д.4")["status"], "ambiguous")
+        self.assertEqual(AM.match_address(idx, "Газопровод пос. (Сосенское), д.7")["lat"], 55.58)
+        self.assertEqual(AM.match_address(idx, "Лескова ул., д.7")["status"], "notfound")
+
+
+class FakeNominatimSearch:
+    def __init__(self):
+        fake = self
+        self.calls = 0
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                fake.calls += 1
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["q"][0]
+                m = re.search(r"д\.(\S+)$", q)
+                res = [{"lat": "55.7", "lon": "37.6", "address": {"house_number": m.group(1).upper()}}] if m else []
+                data = json.dumps(res).encode("utf-8")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+        self.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class GeocodeFile(unittest.TestCase):
+    """Скрипт tools/geocode_file.py: файл на входе, новый файл с координатами на выходе."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "реестр.csv"
+        self.src.write_bytes((FIX / "mji_synthetic.csv").read_bytes())
+        with open(self.src, encoding="utf-8-sig") as f:
+            self.rows = list(csv.DictReader(f))
+        # OSM: каждый второй дом в записи, как в OSM («1-я Синтетическая улица», «Ё»)
+        els = []
+        for i, r in enumerate(self.rows):
+            street, _, keys = AM.parse_address(r["Наименование/адрес"])
+            if i % 2 == 0 and keys:
+                osm_street = " ".join(reversed(street.split()))
+                els.append({"type": "way", "id": i + 1, "center": {"lat": 55.6 + i * 1e-3, "lon": 37.5},
+                            "tags": {"building": "yes", "addr:street": osm_street, "addr:housenumber": keys[0].upper()}})
+        self.overpass = FakeOverpass(els)
+        self.yandex = FakeYandex()
+        self.mos = FakeMosData(n=20, key="mos-key-12345")
+        self.nom = FakeNominatimSearch()
+        self.env = {"MCA_OVERPASS_URL": self.overpass.url, "MCA_YANDEX_URL": self.yandex.url,
+                    "MCA_MOSDATA_URL": self.mos.url, "MCA_NOMINATIM_URL": self.nom.url}
+        os.environ.update(self.env)
+
+    def tearDown(self):
+        for k in self.env:
+            os.environ.pop(k, None)
+        for f in (self.overpass, self.yandex, self.mos, self.nom):
+            f.close()
+        self.tmp.cleanup()
+
+    def run_script(self, *args):
+        base = ["--yes", "--data-dir", str(self.dir / "data"), "--config", str(self.dir / "geocoder.local.json")]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = GF.main([str(self.src), *base, *args])
+        return code, out.getvalue()
+
+    def read_out(self, path):
+        with open(path, encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+
+    def test_all_sources_in_order(self):
+        code, log = self.run_script("--sources", "mos,osm,yandex", "--mos-key", "mos-key-12345", "--yandex-key", "yandex-key-1234")
+        self.assertEqual(code, 0, log)
+        out = self.read_out(self.dir / "реестр_с_координатами.csv")
+        self.assertEqual(len(out), len(self.rows))
+        self.assertEqual(list(out[0])[-4:], ["Широта", "Долгота", "Источник координат", "Точность"])
+        self.assertEqual([r["UNOM"] for r in out], [r["UNOM"] for r in self.rows], "исходные строки и порядок сохранены")
+        by = {}
+        for r in out:
+            by[r["Источник координат"]] = by.get(r["Источник координат"], 0) + 1
+        mos_unoms = {str(5000000 + i) for i in range(20)}
+        expect_mos = sum(1 for r in self.rows if r["UNOM"] in mos_unoms)
+        expect_osm = sum(1 for i, r in enumerate(self.rows) if i % 2 == 0 and r["UNOM"] not in mos_unoms)
+        self.assertEqual(by.get("Адресный реестр Москвы (data.mos.ru)"), expect_mos)
+        self.assertEqual(by.get("OpenStreetMap"), expect_osm)
+        self.assertEqual(by.get("Яндекс Геокодер"), len(self.rows) - expect_mos - expect_osm, "остальные найдены через Яндекс")
+        self.assertIn("найдены для %d из %d" % (len(self.rows), len(self.rows)), log.replace(" ", " "))
+        app_rows = self.read_out(self.dir / "реестр_для_приложения.csv")
+        self.assertEqual(list(app_rows[0]), ["unom", "lat", "lon", "source", "accuracy"])
+        self.assertEqual(len(app_rows), len(self.rows))
+        self.assertEqual(self.read_out(self.dir / "реестр_без_координат.csv"), [])
+
+    def test_xlsx_output_and_nominatim(self):
+        target = self.dir / "результат.xlsx"
+        code, log = self.run_script("--sources", "nominatim", "--nominatim-limit", "10", "--output", str(target))
+        self.assertEqual(code, 0, log)
+        _, rows = read_xlsx_rows(target)
+        self.assertEqual(rows[0][-4:], ["Широта", "Долгота", "Источник координат", "Точность"])
+        self.assertEqual(rows[1][-4:], ["55.7", "37.6", "Nominatim (OpenStreetMap)", "номер дома совпал"])
+        self.assertEqual(sum(1 for r in rows[1:] if len(r) > 8 and r[-2] == "Nominatim (OpenStreetMap)"), 10, "не больше заданного числа адресов")
+        self.assertEqual(self.nom.calls, 10)
+        # повторный запуск берёт ответы из сохранённых, новых запросов нет
+        self.run_script("--sources", "nominatim", "--nominatim-limit", "10", "--output", str(target))
+        self.assertEqual(self.nom.calls, 10)
+        missing = self.read_out(self.dir / "реестр_без_координат.csv")
+        self.assertEqual(len(missing), len(self.rows) - 10)
+
+
+def read_xlsx_rows(path):
+    pm = load("prepare_mji_rows", ROOT / "tools" / "prepare_mji.py")
+    return pm.read_xlsx(path)
 
 
 if __name__ == "__main__":
