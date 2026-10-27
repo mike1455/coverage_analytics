@@ -13,11 +13,11 @@ export async function postJson(url, body = {}) {
   return data;
 }
 
-/** Ждать окончания фоновой задачи serve.py, сообщая её ход. */
+/** Ждать окончания фоновой задачи serve.py, сообщая её ход (onTick может быть асинхронной). */
 export async function waitJob(url, onTick = () => {}) {
   for (;;) {
     const st = await getJson(url);
-    onTick(st);
+    await onTick(st);
     if (!st.job || st.job.state !== 'running') return st;
     await new Promise((r) => setTimeout(r, 1000));
   }

@@ -87,8 +87,10 @@ export function okrugTiles(groups, { onClick, selected, min, max } = {}) {
   const lo = min ?? Math.min(...vals);
   const hi = max ?? Math.max(...vals);
   const cells = [];
-  for (let row = 0; row < 4; row++) {
-    for (let col = 0; col < 4; col++) {
+  const rows = Math.max(...OKRUGS.map((o) => o.grid[1])) + 1;
+  const cols = Math.max(...OKRUGS.map((o) => o.grid[0])) + 1;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
       const o = OKRUGS.find((x) => x.grid[0] === col && x.grid[1] === row);
       if (!o) { cells.push(h('div', { class: 'tile empty-cell', 'aria-hidden': 'true' })); continue; }
       const g = groups.get(o.code) || {};

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -541,8 +542,9 @@ OA = load("osm_addresses_mod", ROOT / "tools" / "osm_addresses.py")
 class FakeOverpass:
     """Локальный «Overpass»: отвечает JSON по POST data=..., умеет имитировать сбои."""
 
-    def __init__(self, elements, fail_first=0, too_big_for=None):
+    def __init__(self, elements, fail_first=0, too_big_for=None, fail_for=None, slow_for=None):
         self.elements, self.fail_first, self.too_big_for = elements, fail_first, too_big_for
+        self.fail_for, self.slow_for = fail_for, slow_for
         self.queries = []
         fake = self
 
@@ -551,11 +553,13 @@ class FakeOverpass:
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
                 q = urllib.parse.parse_qs(body)["data"][0]
                 fake.queries.append(q)
-                if fake.fail_first > 0:
-                    fake.fail_first -= 1
+                if fake.fail_first > 0 or (fake.fail_for and fake.fail_for in q):
+                    fake.fail_first = max(0, fake.fail_first - 1)
                     self.send_response(504)
                     self.end_headers()
                     return
+                if fake.slow_for and fake.slow_for in q:
+                    time.sleep(2.5)
                 if fake.too_big_for and fake.too_big_for in q:
                     out = {"elements": [], "remark": "runtime error: Query timed out in \"query\" at line 1 after 240 seconds."}
                 else:
@@ -636,6 +640,46 @@ class OsmAddresses(unittest.TestCase):
         finally:
             bad.close()
             good.close()
+
+    def test_parts_saved_and_resumed(self):
+        cells = OA.split_bbox(OA.MOSCOW_BBOX, 2, 2)
+        bad = "(area.a)(%.5f,%.5f,%.5f,%.5f)" % cells[1]
+        fake = FakeOverpass(ELEMENTS, fail_for=bad)
+        try:
+            prog = BM.Progress()
+            OA.download(prog, out=self.out, endpoints=[fake.url], grid=(2, 2), pause=0)
+            st = prog.snapshot()
+            self.assertEqual(st["state"], "done", st)
+            self.assertIn("Не загрузились части: 1", st["message"])
+            self.assertEqual((st["failed"], len(st["parts"])), (1, 3), "остальные части скачаны и сохранены по одной")
+            parts = self.out.parent / "parts"
+            self.assertEqual(len(list(parts.glob("*.json"))), 3)
+            self.assertIs(OA.status(self.out)["complete"], False)
+            # второй запуск: сервер починился, запрашивается только недостающая часть
+            fake.fail_for = None
+            n = len(fake.queries)
+            prog = BM.Progress()
+            OA.download(prog, out=self.out, endpoints=[fake.url], grid=(2, 2), pause=0)
+            self.assertEqual(prog.snapshot()["state"], "done")
+            self.assertEqual(len(fake.queries) - n, 1)
+            self.assertIs(OA.status(self.out)["complete"], True)
+            self.assertFalse(parts.exists(), "после полной загрузки части удаляются")
+        finally:
+            fake.close()
+
+    def test_slow_part_is_split_not_waited(self):
+        first = "(area.a)(%.5f,%.5f,%.5f,%.5f)" % OA.split_bbox(OA.MOSCOW_BBOX, 2, 2)[0]
+        fake = FakeOverpass(ELEMENTS, slow_for=first)
+        try:
+            prog = BM.Progress()
+            t0 = time.time()
+            OA.download(prog, out=self.out, endpoints=[fake.url], grid=(2, 2), pause=0, timeout=1)
+            st = prog.snapshot()
+            self.assertEqual(st["state"], "done", st)
+            self.assertEqual(st["total"], 7, "медленная часть разделена на 4")
+            self.assertLess(time.time() - t0, 30)
+        finally:
+            fake.close()
 
     def test_failure_keeps_previous_file(self):
         self.out.parent.mkdir(parents=True)

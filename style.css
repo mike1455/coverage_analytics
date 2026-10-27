@@ -381,6 +381,17 @@ table.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size
 .tbl td.r, .tbl th.r { text-align: right; font-variant-numeric: tabular-nums; }
 .tbl .addr { max-width: 380px; }
 .tbl .sub { font-size: 11.5px; color: var(--muted); }
+.tbl.dt thead { position: sticky; top: 0; z-index: 2; }
+.tbl.dt th { position: static; }
+.tbl tr.dt-filters th { padding: 0 6px 7px; font-weight: 400; }
+.tbl .dt-filter { width: 100%; min-width: 64px; height: 28px; padding: 0 7px; font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.tbl th.r .dt-filter { text-align: right; }
+.tbl .dt-filter.bad { border-color: var(--danger-ink); background: color-mix(in srgb, var(--danger-ink) 7%, var(--surface)); }
+.tbl .dt-filter:disabled { opacity: 0.45; }
+.dt-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; margin: -4px 0 8px; }
+.dt-tools .dt-hint { margin-right: auto; }
+.dt-tools > [hidden] { display: none; }
+.tbl td.dt-empty { color: var(--muted); text-align: center; padding: 18px 10px; }
 .pager { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 10px 2px 0; color: var(--ink-2); flex-wrap: wrap; }
 .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 12px; }
 .filter-bar .field-inline select, .filter-bar .field-inline input { min-width: 120px; }
@@ -442,6 +453,14 @@ table.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size
 .src-row.fail .src-line .ic { color: var(--st-critical); }
 .src-row.warn .src-line .ic { color: var(--st-warning); }
 @media (max-width: 720px) { .src-row { grid-template-columns: 1fr; } }
+.geo-float {
+  position: fixed; right: 18px; top: 78px; z-index: 1300; max-width: 380px;
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: start;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 12px 14px;
+}
+.geo-float .ic { color: var(--accent); line-height: 0; margin-top: 2px; }
+.geo-float .ic .icon { animation: spin 1.2s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .geo-float .ic .icon { animation: none; } }
 
 /* ---------- модальные окна ---------- */
 .modal-back { position: fixed; inset: 0; z-index: 1500; background: rgba(10, 10, 8, 0.38); display: grid; place-items: center; padding: 20px; }

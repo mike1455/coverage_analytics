@@ -253,7 +253,7 @@ def start_addresses(data):
             return False
         ADDR_JOB.reset()
         ADDR_JOB.set(state="running", stage="Подготовка")
-        kwargs = {"out": ADDRESSES_FILE, "endpoints": endpoints}
+        kwargs = {"out": ADDRESSES_FILE, "endpoints": endpoints, "fresh": bool(isinstance(data, dict) and data.get("fresh"))}
         if env:  # свой сервер Overpass (или тестовый): без пауз и проверки объёма
             kwargs.update(pause=0, min_count=1)
         _addr_thread = threading.Thread(target=osm_addresses.download, args=(ADDR_JOB,), daemon=True, kwargs=kwargs)

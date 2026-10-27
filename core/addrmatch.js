@@ -103,8 +103,12 @@ const SAME_PLACE_M = 150;
 
 /** Индекс адресов OSM. rows: [type, street, housenumber, place, city, lat, lon]. */
 export function buildIndex(rows) {
-  const strict = new Map();
-  const loose = new Map();
+  return addRows({ strict: new Map(), loose: new Map(), size: 0 }, rows);
+}
+
+/** Добавить адреса в индекс (части справочника приходят по мере скачивания). */
+export function addRows(index, rows) {
+  const { strict, loose } = index;
   const add = (map, key, e) => {
     const list = map.get(key);
     if (list) list.push(e); else map.set(key, [e]);
@@ -128,7 +132,8 @@ export function buildIndex(rows) {
       }
     }
   }
-  return { strict, loose, size: rows.length };
+  index.size += rows.length;
+  return index;
 }
 
 function clustered(list) {
@@ -157,10 +162,18 @@ function choose(cands, qualifier) {
  * @returns {{status: 'ok'|'ambiguous'|'notfound'|'unparsed', lat?, lon?, exact?, type?, n?}}
  */
 export function matchAddress(index, address) {
+  return matchPrepared(index, prepareAddress(address));
+}
+
+/** Разобранный адрес для многократного поиска (справочник приходит частями, адрес разбирается один раз). */
+export function prepareAddress(address) {
   const p = parseAddress(address);
-  const bag = streetBag(p.street);
+  return { bag: streetBag(p.street), bagLoose: streetBag(p.street, { dropType: true }), keys: p.keys, qualifier: p.qualifier };
+}
+
+export function matchPrepared(index, p) {
+  const { bag, bagLoose } = p;
   if (!bag || !p.keys.length) return { status: 'unparsed' };
-  const bagLoose = streetBag(p.street, { dropType: true });
   // Без типа улицы ищем, только если тип в адресе был: «Щапово пос.» не должен совпасть с «улицей Щапово»
   const tiers = [[index.strict, bag, true], [index.loose, bagLoose !== bag ? bagLoose : '', false]];
   for (const [map, b, exact] of tiers) {

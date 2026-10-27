@@ -129,7 +129,13 @@ function boundaryRelations(areas) {
   return { 5: okr, 8: ar };
 }
 function osmServer(elements, relations) {
-  const body = JSON.stringify({ version: 0.6, elements });
+  // Адреса отдаются по квадратам из запроса (приложение качает справочник частями) с задержкой, чтобы был виден ход
+  const inBox = (q) => {
+    const b = q.match(/\((-?[\d.]+),(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\)/);
+    if (!b) return elements;
+    const [s, w, n, e] = b.slice(1).map(Number);
+    return elements.filter((el) => { const c = el.center || el; return c.lat >= s && c.lat <= n && c.lon >= w && c.lon <= e; });
+  };
   return new Promise((res) => {
     const srv = http.createServer((req, resp) => {
       let data = '';
@@ -147,7 +153,7 @@ function osmServer(elements, relations) {
         }
         const q = new URLSearchParams(data).get('data') || '';
         if (q.includes('boundary')) resp.end(JSON.stringify({ elements: relations[q.includes('"admin_level"="5"') ? 5 : 8] }));
-        else resp.end(body);
+        else setTimeout(() => resp.end(JSON.stringify({ version: 0.6, elements: inBox(q) })), 150);
       });
     });
     srv.listen(0, '127.0.0.1', () => res(srv));
@@ -353,6 +359,33 @@ function prepareSourceFolder() {
     await page.click('.nav-item[data-view="rating"]');
     await page.waitForTimeout(500);
     await page.screenshot({ path: join(OUT, '06_rating.png'), fullPage: true });
+    // Фильтры и сортировка таблицы округов: условие по проценту, сортировка по клику на заголовок
+    {
+      const okr = page.locator('#view-rating .card:has(h3:has-text("Округа: числители")) table');
+      const mkdCol = async () => (await okr.locator('tbody tr td:nth-child(3)').allInnerTexts()).map((x) => Number(x.replace(/\D/g, '')));
+      const before = await mkdCol();
+      const total = before.length;
+      await okr.locator('input[aria-label="Фильтр: МКД МЖИ"]').fill('>10');
+      await page.waitForTimeout(300);
+      const big = (await mkdCol()).length;
+      assert.ok(big > 0 && big < total, 'есть округа с числом МКД больше и меньше 10');
+      assert.equal(big, before.filter((v) => v > 10).length, 'фильтр «>10» по числу МКД');
+      await okr.locator('input[aria-label="Фильтр: МКД МЖИ"]').fill('больше');
+      await page.waitForTimeout(300);
+      assert.equal(await okr.locator('input.bad').count(), 1, 'непонятное условие подсвечивается');
+      await page.click('#view-rating button:has-text("Сбросить фильтры")');
+      await page.waitForTimeout(300);
+      assert.equal(await okr.locator('tbody tr').count(), total, 'сброс фильтров');
+      await okr.locator('th.sortable:has-text("МКД МЖИ")').click();
+      const vals = await mkdCol();
+      assert.deepEqual(vals, [...vals].sort((a, b) => b - a), 'сортировка по убыванию МКД');
+      await okr.locator('input[aria-label="Фильтр: Округ"]').fill('зао');
+      await okr.locator('input[aria-label="Фильтр: % полностью"]').fill('>30');
+      await page.waitForTimeout(300);
+      await page.locator('#view-rating .card:has(h3:has-text("Округа: числители"))').screenshot({ path: join(OUT, '06a_rating_filters.png') });
+      await page.click('#view-rating button:has-text("Сбросить фильтры")');
+      log(`таблица округов: ${total} строк, фильтр «>10» оставил ${big}, сортировка и сброс работают`);
+    }
     await page.click('.nav-item[data-view="houses"]');
     await page.waitForTimeout(500);
     await page.screenshot({ path: join(OUT, '07_houses.png') });
@@ -425,7 +458,18 @@ function prepareSourceFolder() {
         assert.equal(await page.isChecked(`.modal input[aria-label="${title}"]`), true, 'с ключом источник включается');
       }
       await page.click('.modal button.btn-block:has-text("Найти координаты")');
-      await page.waitForSelector('.modal :text("С координатами")', { timeout: 120000 });
+      // Справочник OSM качается частями: найденные дома появляются на карте до конца загрузки
+      await page.waitForFunction(() => /уже на карте: [1-9]/.test(document.querySelector('.modal')?.innerText || ''), null, { timeout: 60000 });
+      const liveOsm = await page.evaluate(() => [...window.__app.state.geo.values()].filter((g) => g.status === 'osm').length);
+      assert.ok(liveOsm > 0, 'дома из полученных частей сохранены и видны на карте до окончания загрузки');
+      await page.screenshot({ path: join(OUT, '10a_geocode_live.png') });
+      await page.click('.modal button:has-text("Свернуть, поиск продолжится")');
+      await page.waitForSelector('.geo-float', { timeout: 5000 });
+      await page.screenshot({ path: join(OUT, '10b_geocode_minimized.png') });
+      await page.click('.geo-float button:has-text("Подробнее")');
+      await page.waitForSelector('.modal .note.ok:has-text("С координатами")', { timeout: 120000 });
+      assert.equal(await page.locator('.geo-float').count(), 0, 'плашка убирается, когда окно открыто');
+      assert.ok(!existsSync(join(ROOT, 'data', 'local', 'osm', 'parts')), 'после полной загрузки части собраны в один файл');
       await page.screenshot({ path: join(OUT, '10_geocode.png') });
       const text = await page.evaluate(() => document.querySelector('.modal').innerText);
       assert.match(text, /найдено по UNOM: \d+/);
@@ -496,7 +540,10 @@ function prepareSourceFolder() {
     yandex.close();
     mosdata.close();
     if (BASEMAP_TEST) for (const f of [BASEMAP, `${BASEMAP}.json`]) rmSync(f, { force: true });
-    if (GEOCODE_TEST) for (const f of [ADDRESSES, GEOCODED, YANDEX_CACHE, MOSREG]) rmSync(f, { force: true });
+    if (GEOCODE_TEST) {
+      for (const f of [ADDRESSES, GEOCODED, YANDEX_CACHE, MOSREG]) rmSync(f, { force: true });
+      rmSync(join(ROOT, 'data', 'local', 'osm', 'parts'), { recursive: true, force: true });
+    }
     if (BOUNDS_TEST) for (const f of BOUNDS) rmSync(f, { force: true });
     try { rmdirSync(join(ROOT, 'data', 'local', 'osm')); } catch (_) { /* папка не пуста или её нет */ }
     rmSync(SRC_DIR, { recursive: true, force: true });

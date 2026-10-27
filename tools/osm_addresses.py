@@ -12,6 +12,8 @@ data/local/osm/moscow_addresses.json. Дальше координаты домо
 import datetime as dt
 import json
 import os
+import shutil
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -28,7 +30,7 @@ ENDPOINTS = [
 USER_AGENT = "coverage-analytics/1.0 (local address lookup)"
 # Москва с ТиНАО и Зеленоградом: юг, запад, север, восток
 MOSCOW_BBOX = (55.13, 36.80, 56.03, 37.97)
-GRID = (4, 4)
+GRID = (8, 8)  # мелкие части отвечают быстро даже в плотном центре
 FIELDS = ["type", "street", "housenumber", "place", "city", "lat", "lon"]
 MIN_COUNT = 1000  # в Москве адресов на два порядка больше: меньше значит, что ответ неполный
 
@@ -45,7 +47,7 @@ def overpass_query(bbox):
     s, w, n, e = bbox
     b = "%.5f,%.5f,%.5f,%.5f" % (s, w, n, e)
     return (
-        '[out:json][timeout:240][maxsize:536870912];'
+        '[out:json][timeout:60][maxsize:536870912];'
         'area["ISO3166-2"="RU-MOW"]["admin_level"="4"]->.a;'
         '(way["building"]["addr:housenumber"](area.a)(%s);'
         'relation["building"]["addr:housenumber"](area.a)(%s););'
@@ -91,89 +93,146 @@ def parse_elements(data):
 
 
 class Overpass:
-    def __init__(self, endpoints=None, timeout=300, pause=1.0):
+    def __init__(self, endpoints=None, timeout=90, pause=1.0):
         self.endpoints = list(endpoints or ENDPOINTS)
         self.timeout = timeout
         self.pause = pause
         self.used = ""
 
+    def _first(self, url):
+        self.endpoints.remove(url)
+        self.endpoints.insert(0, url)  # рабочее зеркало первым: следующие части сразу туда
+
     def run(self, query, progress=None):
+        """Один проход по зеркалам. Если все отвечают слишком долго, часть велика: её делят, а не ждут повторно."""
         last = None
-        # рабочее зеркало становится первым, чтобы следующие квадраты шли сразу туда
-        for attempt in range(3):
-            for url in list(self.endpoints):
-                if progress:
-                    progress.check()
-                body = urllib.parse.urlencode({"data": query}).encode("utf-8")
-                req = urllib.request.Request(url, data=body, headers={
-                    "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
-                try:
-                    with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                        data = json.loads(r.read().decode("utf-8"))
-                    rows = parse_elements(data)
-                    self.used = url
-                    self.endpoints.remove(url)
-                    self.endpoints.insert(0, url)
-                    return rows
-                except TooBig:
-                    self.endpoints.remove(url)
-                    self.endpoints.insert(0, url)  # сервер рабочий, просто квадрат велик
-                    raise
-                except urllib.error.HTTPError as e:
-                    last = "%s: HTTP %d" % (url, e.code)
-                except AddressError as e:
-                    last = "%s: %s" % (url, e)
-                except (OSError, ValueError) as e:
-                    last = "%s: %s" % (url, e)
-            time.sleep(self.pause * (10 * (attempt + 1)))
-        raise AddressError("Overpass API недоступен (%s). Проверьте доступ в интернет или повторите позже." % last)
+        timeouts = 0
+        for url in list(self.endpoints):
+            if progress:
+                progress.check()
+            body = urllib.parse.urlencode({"data": query}).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers={
+                "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                rows = parse_elements(data)
+                self.used = url
+                self._first(url)
+                return rows
+            except TooBig:
+                self._first(url)
+                raise
+            except urllib.error.HTTPError as e:
+                last = "%s: HTTP %d" % (url, e.code)
+                if e.code == 429 and self.pause:
+                    time.sleep(15 * self.pause)  # сервер просит подождать
+            except socket.timeout:
+                timeouts += 1
+                last = "%s: нет ответа за %d с" % (url, self.timeout)
+            except urllib.error.URLError as e:
+                if isinstance(e.reason, socket.timeout):
+                    timeouts += 1
+                last = "%s: %s" % (url, e.reason)
+            except (AddressError, OSError, ValueError) as e:
+                last = "%s: %s" % (url, e)
+        if timeouts == len(self.endpoints):
+            raise TooBig(last)
+        raise AddressError("Overpass API недоступен (%s)" % last)
 
 
-def download(progress, out=OUTPUT, endpoints=None, bbox=MOSCOW_BBOX, grid=GRID, pause=1.0, min_count=None):
-    """Фоновая задача для serve.py: скачать адреса по квадратам, записать файл целиком в конце."""
+def cell_key(cell):
+    return "_".join("%.4f" % v for v in cell)
+
+
+def write_json_atomic(path, obj):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def download(progress, out=OUTPUT, endpoints=None, bbox=MOSCOW_BBOX, grid=GRID, pause=1.0, min_count=None, fresh=False, timeout=90):
+    """Фоновая задача для serve.py. Каждая полученная часть сразу пишется в osm/parts/<ключ>.json:
+    приложение показывает найденные дома, не дожидаясь конца, а после обрыва докачиваются только
+    недостающие части. В конце части собираются в moscow_addresses.json."""
     out = Path(out)
+    parts_dir = out.parent / "parts"
     progress.cancel.clear()
     now = lambda: dt.datetime.now().astimezone().isoformat(timespec="seconds")  # noqa: E731
+    if fresh and parts_dir.is_dir():
+        shutil.rmtree(str(parts_dir), ignore_errors=True)
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    have = {p.stem for p in parts_dir.glob("*.json")}
+    split = {p.stem for p in parts_dir.glob("*.split")}
+    rows = {}
+    for k in sorted(have):  # части прошлого запуска
+        try:
+            rows.update(json.loads((parts_dir / (k + ".json")).read_text(encoding="utf-8"))["rows"])
+        except (OSError, ValueError, KeyError):
+            have.discard(k)
     queue = [(c, 0) for c in split_bbox(bbox, *grid)]
+    done = 0
+    ready = sorted(have)
+    progress.extra.update(addresses=len(rows), parts=list(ready), failed=0)
     progress.set(state="running", stage="Запрос адресов OpenStreetMap", done=0, total=len(queue), message="",
                  started=now(), finished=None)
-    api = Overpass(endpoints, pause=pause)
-    rows = {}
-    done = 0
+    api = Overpass(endpoints, timeout=timeout, pause=pause)
+    failed = []
     try:
         while queue:
             progress.check()
             cell, depth = queue.pop(0)
-            progress.set(stage="Адреса OpenStreetMap: часть %d из %d" % (done + 1, done + 1 + len(queue)))
-            try:
-                rows.update(api.run(overpass_query(cell), progress))
-            except TooBig:
-                if depth >= 2:
-                    raise
+            key = cell_key(cell)
+            if key in split:  # в прошлый раз эту часть уже делили
                 queue[0:0] = [(c, depth + 1) for c in split_bbox(cell, 2, 2)]
                 progress.set(total=done + len(queue))
                 continue
+            if key in have:
+                done += 1
+                progress.set(done=done, total=done + len(queue))
+                continue
+            progress.set(stage="Адреса OpenStreetMap: часть %d из %d" % (done + 1, done + 1 + len(queue)))
+            try:
+                part = api.run(overpass_query(cell), progress)
+            except TooBig:
+                if depth < 2:
+                    (parts_dir / (key + ".split")).write_text("", encoding="utf-8")
+                    queue[0:0] = [(c, depth + 1) for c in split_bbox(cell, 2, 2)]
+                    progress.set(total=done + len(queue))
+                    continue
+                failed.append(key)
+                part = None
+            except AddressError:
+                failed.append(key)  # остальные части всё равно скачиваются
+                part = None
             done += 1
-            progress.extra["addresses"] = len(rows)
+            if part is not None:
+                write_json_atomic(parts_dir / (key + ".json"), {"key": key, "rows": part})
+                rows.update(part)
+                ready.append(key)
+            progress.extra.update(addresses=len(rows), parts=list(ready), failed=len(failed))
             progress.set(done=done, total=done + len(queue))
             if pause and queue:
                 time.sleep(pause)  # бережём общий сервер
         if len(rows) < (MIN_COUNT if min_count is None else min_count):
             raise AddressError("Overpass вернул слишком мало адресов (%d). Повторите позже." % len(rows))
         progress.set(stage="Сохранение")
-        out.parent.mkdir(parents=True, exist_ok=True)
         doc = {"format": "osm-addresses", "version": 1, "downloadedAt": now(), "endpoint": api.used,
                "source": "© участники OpenStreetMap (ODbL), Overpass API", "count": len(rows),
-               "fields": FIELDS, "rows": list(rows.values())}
-        tmp = out.with_name(out.name + ".tmp")
-        tmp.write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(str(tmp), str(out))
-        progress.set(state="done", stage="Готово", finished=now())
+               "complete": not failed, "fields": FIELDS, "rows": list(rows.values())}
+        write_json_atomic(out, doc)
+        if not failed:
+            shutil.rmtree(str(parts_dir), ignore_errors=True)
+        msg = ("Не загрузились части: %d. Следующий запуск докачает только их." % len(failed)) if failed else ""
+        progress.set(state="done", stage="Готово", message=msg, finished=now())
         return doc
     except Exception as e:  # noqa: BLE001 - сообщение показывается в приложении
         cancelled = progress.cancel.is_set()
         progress.set(state="cancelled" if cancelled else "error", stage="",
-                     message="Загрузка отменена, прежний справочник не изменился." if cancelled else str(e), finished=now())
+                     message=("Остановлено. Полученные части сохранены, следующий запуск продолжит с них." if cancelled else
+                              "%s. Полученные части сохранены, следующий запуск продолжит с них." % e), finished=now())
         return None
 
 
@@ -186,8 +245,8 @@ def status(out=OUTPUT):
         try:
             with open(out, "r", encoding="utf-8") as f:
                 head = f.read(400)
-            # count и дата лежат в начале файла, весь файл не читаем
-            for key in ("downloadedAt", "count"):
+            # count, дата и полнота лежат в начале файла, весь файл не читаем
+            for key in ("downloadedAt", "count", "complete"):
                 i = head.find('"%s":' % key)
                 if i >= 0:
                     v = head[i + len(key) + 3:].split(",", 1)[0]

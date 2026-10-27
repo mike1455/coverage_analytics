@@ -12,6 +12,7 @@ import { openGeocodeDialog } from './geocode.js';
 import { getJson, postJson, waitJob } from './api.js';
 import { openCard, openEdcCard, closeCard, nominatimConsent } from './card.js';
 import { barChart, stackBar, legend, okrugTiles, hideTip } from './charts.js';
+import { dataTable } from './datatable.js';
 import {
   kpiOf, groupKpi, rankGroups, RANK_METRICS, REQ_METRICS, QUARTERS, NA_REASON, COV_LABEL, MATCH_LABEL, MIN_SAMPLE,
   rankValue, reqValue, heatPoints,
@@ -620,24 +621,39 @@ function okrugTable(groups, ranked, metric) {
   const rk = new Map(ranked.map((x) => [x.key, x.rank]));
   const edc = hasEdc();
   const st = app.state;
-  const head = ['Место', 'Округ', 'МКД МЖИ', 'Сопоставлено', 'Оценено (полнота)', 'Полностью', 'Частично', 'Нет привязки', '% полностью', 'Подъезды с привязкой / всего', '% подъездов', 'Заявок 2026', 'Не оценено'];
-  const tbl = h('table', { class: 'tbl' }, h('thead', null, h('tr', null, head.map((t, i) => h('th', { class: i > 1 ? 'r' : '' }, t)))),
-    h('tbody', null, groups.map((g) => h('tr', { class: `clickable`, onclick: () => setFilter({ okrug: app.f.okrug === g.key ? '' : g.key }) },
-      h('td', { class: 'r' }, rk.get(g.key) || na()),
-      h('td', null, h('b', null, g.key), h('div', { class: 'sub' }, okrugByCode(g.key)?.name || ''), (metric === 'fullShare' || metric === 'entrShare') && g.smallSample && edc ? h('span', { class: 'chip warn' }, 'малая выборка') : null),
-      h('td', { class: 'r' }, fmt.int(g.mkd)),
-      h('td', { class: 'r' }, edc ? `${fmt.int(g.matched)} (${fmt.pct(g.matchRate)})` : na()),
-      h('td', { class: 'r' }, edc ? `${fmt.int(g.evaluated)} (${fmt.pct(g.evalCompleteness)})` : na()),
-      h('td', { class: 'r' }, edc ? fmt.int(g.full) : na()), h('td', { class: 'r' }, edc ? fmt.int(g.partial) : na()), h('td', { class: 'r' }, edc ? fmt.int(g.none) : na()),
-      h('td', { class: 'r' }, edc ? h('b', null, fmt.pct(g.fullShare)) : na()),
-      h('td', { class: 'r' }, edc ? `${fmt.int(g.entrLinked)} / ${fmt.int(g.entrTotal)}` : na()),
-      h('td', { class: 'r' }, edc ? h('b', null, fmt.pct(g.entrShare)) : na()),
-      h('td', { class: 'r' }, edc ? fmt.int(app.f.quarter ? g.req[app.f.quarter] : g.req.total) : na()),
-      h('td', { class: 'r' }, edc ? fmt.int(g.mkd - g.evaluated) : na())))));
+  const q = app.f.quarter;
+  const e = (fn) => (g) => (edc ? fn(g) : null); // без выгрузок ЕДЦ в этих столбцах нет данных
+  const cell = (fn, bold) => (g) => (edc ? (bold ? h('b', null, fn(g)) : fn(g)) : na());
+  const num = (key, label, value, text = (g) => fmt.int(value(g)), opts = {}) => ({ key, label, type: 'num', r: true, value: e(value), cell: cell(text, opts.bold), disabled: !edc, ...opts });
+  const columns = [
+    { key: 'rank', label: 'Место', type: 'num', r: true, value: (g) => rk.get(g.key) ?? null, cell: (g) => rk.get(g.key) || na() },
+    {
+      key: 'okrug', label: 'Округ', type: 'text', value: (g) => g.key,
+      search: (g) => { const o = okrugByCode(g.key); return `${g.key} ${o ? `${o.name} ${o.full}` : ''}`; },
+      cell: (g) => [h('b', null, g.key), h('div', { class: 'sub' }, okrugByCode(g.key)?.name || ''),
+        (metric === 'fullShare' || metric === 'entrShare') && g.smallSample && edc ? h('span', { class: 'chip warn' }, 'малая выборка') : null],
+    },
+    { key: 'mkd', label: 'МКД МЖИ', type: 'num', r: true, value: (g) => g.mkd, cell: (g) => fmt.int(g.mkd) },
+    num('matched', 'Сопоставлено', (g) => g.matched, (g) => `${fmt.int(g.matched)} (${fmt.pct(g.matchRate)})`),
+    num('evaluated', 'Оценено (полнота)', (g) => g.evaluated, (g) => `${fmt.int(g.evaluated)} (${fmt.pct(g.evalCompleteness)})`),
+    num('full', 'Полностью', (g) => g.full),
+    num('partial', 'Частично', (g) => g.partial),
+    num('none', 'Нет привязки', (g) => g.none),
+    num('fullShare', '% полностью', (g) => g.fullShare ?? null, (g) => fmt.pct(g.fullShare), { scale: 100, bold: true }),
+    num('entrLinked', 'Подъезды с привязкой / всего', (g) => g.entrLinked, (g) => `${fmt.int(g.entrLinked)} / ${fmt.int(g.entrTotal)}`),
+    num('entrShare', '% подъездов', (g) => g.entrShare ?? null, (g) => fmt.pct(g.entrShare), { scale: 100, bold: true }),
+    num('req', 'Заявок 2026', (g) => (q ? g.req[q] : g.req.total)),
+    num('notEval', 'Не оценено', (g) => g.mkd - g.evaluated),
+  ];
+  app.ui.okrugTable = app.ui.okrugTable || {};
+  const { table, tools } = dataTable({
+    rows: groups, columns, state: app.ui.okrugTable,
+    rowAttrs: (g) => ({ class: 'clickable', onclick: () => setFilter({ okrug: app.f.okrug === g.key ? '' : g.key }) }),
+  });
   return h('div', { class: 'card', style: { marginBottom: '14px' } },
     h('div', { class: 'card-head' }, h('h3', null, 'Округа: числители и знаменатели'),
       h('span', { class: 'sub' }, `Срез МЖИ ${fmt.date(st.snapMji && st.snapMji.dataDate)}, ЕДЦ ${st.snapEdc ? fmt.date(st.snapEdc.dataDate) : NA}, «Не оценено» не означает «не подключено»`)),
-    h('div', { class: 'table-wrap' }, tbl));
+    tools, table);
 }
 
 function areaTable() {
@@ -645,23 +661,31 @@ function areaTable() {
   const rows = okrug ? app.state.rows.filter((r) => r.okrug === okrug) : app.state.rows;
   const groups = groupKpi(rows, 'area', geoSet());
   const edc = hasEdc();
-  const s = app.ui.areaSort || { key: 'mkd', dir: -1 };
-  const val = (g) => ({ key: g.key, mkd: g.mkd, matched: g.matched, evaluated: g.evaluated, fullShare: g.fullShare ?? -1, entrShare: g.entrShare ?? -1, req: g.req.total, geo: g.geo })[s.key];
-  groups.sort((a, b) => (typeof val(a) === 'string' ? val(a).localeCompare(val(b), 'ru') : val(a) - val(b)) * s.dir);
-  const th = (key, label, r = true) => h('th', { class: `sortable ${r ? 'r' : ''}`, onclick: () => { app.ui.areaSort = { key, dir: s.key === key ? -s.dir : -1 }; render(); } }, label, s.key === key ? h('span', { class: 'arrow' }, s.dir > 0 ? '↑' : '↓') : null);
+  const e = (fn) => (g) => (edc ? fn(g) : null);
+  const num = (key, label, value, text, opts = {}) => ({ key, label, type: 'num', r: true, value, cell: (g) => text(g), ...opts });
+  const columns = [
+    { key: 'key', label: 'Район', type: 'text', value: (g) => g.key },
+    num('mkd', 'МКД МЖИ', (g) => g.mkd, (g) => fmt.int(g.mkd)),
+    num('matched', 'Сопоставлено', e((g) => g.matched), (g) => (edc ? fmt.int(g.matched) : na()), { disabled: !edc }),
+    num('evaluated', 'Оценено', e((g) => g.evaluated), (g) => (edc ? fmt.int(g.evaluated) : na()), { disabled: !edc }),
+    num('fullShare', '% полностью', e((g) => g.fullShare ?? null), (g) => (edc ? [fmt.pct(g.fullShare), g.smallSample && g.evaluated ? h('div', { class: 'sub' }, `N=${g.evaluated}`) : null] : na()), { scale: 100, disabled: !edc }),
+    num('entrShare', '% подъездов', e((g) => g.entrShare ?? null), (g) => (edc ? fmt.pct(g.entrShare) : na()), { scale: 100, disabled: !edc }),
+    num('req', 'Заявок 2026', e((g) => g.req.total), (g) => (edc ? fmt.int(g.req.total) : na()), { disabled: !edc }),
+    num('geo', 'С координатами', (g) => g.geo, (g) => fmt.int(g.geo)),
+  ];
+  app.ui.areaTable = app.ui.areaTable || { sort: 'mkd', dir: -1 };
+  const { table, tools } = dataTable({
+    rows: groups, columns, state: app.ui.areaTable, maxHeight: '520px',
+    rowAttrs: (g) => ({
+      class: 'clickable', onclick: () => {
+        const r0 = rows.find((r) => (r.area || '(район не указан)') === g.key);
+        app.f.okrug = r0 ? r0.okrug : app.f.okrug; app.f.area = g.key === '(район не указан)' ? '' : g.key; app.ui.table.page = 0; go('houses');
+      },
+    }),
+  });
   return h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h3', null, okrug ? `Районы: ${okrugByCode(okrug)?.full || okrug}` : 'Районы Москвы'), h('span', { class: 'sub' }, `${groups.length} ${plural(groups.length, 'район', 'района', 'районов')}, по клику откроется список домов`)),
-    h('div', { class: 'table-wrap', style: { maxHeight: '520px' } }, h('table', { class: 'tbl' },
-      h('thead', null, h('tr', null, th('key', 'Район', false), th('mkd', 'МКД МЖИ'), th('matched', 'Сопоставлено'), th('evaluated', 'Оценено'), th('fullShare', '% полностью'), th('entrShare', '% подъездов'), th('req', 'Заявок 2026'), th('geo', 'С координатами'))),
-      h('tbody', null, groups.map((g) => h('tr', {
-        class: 'clickable', onclick: () => {
-          const r0 = rows.find((r) => (r.area || '(район не указан)') === g.key);
-          app.f.okrug = r0 ? r0.okrug : app.f.okrug; app.f.area = g.key === '(район не указан)' ? '' : g.key; app.ui.table.page = 0; go('houses');
-        },
-      },
-      h('td', null, g.key), h('td', { class: 'r' }, fmt.int(g.mkd)), h('td', { class: 'r' }, edc ? fmt.int(g.matched) : na()), h('td', { class: 'r' }, edc ? fmt.int(g.evaluated) : na()),
-      h('td', { class: 'r' }, edc ? fmt.pct(g.fullShare) : na(), edc && g.smallSample && g.evaluated ? h('div', { class: 'sub' }, `N=${g.evaluated}`) : null),
-      h('td', { class: 'r' }, edc ? fmt.pct(g.entrShare) : na()), h('td', { class: 'r' }, edc ? fmt.int(g.req.total) : na()), h('td', { class: 'r' }, fmt.int(g.geo))))))));
+    tools, table);
 }
 
 // ---------------------------------------------------------------- вид «Дома и подъезды»
