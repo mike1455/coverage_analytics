@@ -17,7 +17,7 @@ import { summaryData, buildPoster, posterPng, SUMMARY_METRICS } from './summary.
 import { downloadWorkbook } from './export.js';
 import {
   kpiOf, groupKpi, rankGroups, METRICS, MAIN_METRICS, ACTIVITY_METRICS, REQ_METRICS, QUARTERS, NA_REASON, COV_LABEL, MATCH_LABEL, MIN_SAMPLE,
-  metricValue, smallSampleFor, reqValue, hexCells, houseStatus, HS_LABEL, HS_HINT, HS_ORDER,
+  metricValue, smallSampleFor, reqValue, hexCells, houseStatus, servedNoRequests, HS_LABEL, HS_HINT, HS_ORDER,
 } from './analytics.js';
 import { OKRUGS, OKRUG_CODES, NO_OKRUG, okrugByCode } from './core/okrugs.js';
 import { Q } from './core/edc.js';
@@ -302,7 +302,7 @@ function kpiStrip(k) {
   const sw = (s) => h('i', { class: 'kpi-sw', style: { background: HS_COLOR[s] } });
   return h('div', { class: 'kpis' },
     kpiTile('Домов в реестре МЖИ', fmt.int(k.mkd), st.snapMji ? `срез МЖИ ${fmt.date(st.snapMji.dataDate)}` : ''),
-    kpiTile('Обслуживаются в ЕДЦ', edc ? fmt.int(k.served) : null, edc ? `${fmt.pct(k.servedShare)} домов` : 'загрузите выгрузки ЕДЦ', { bar: edc ? k.servedShare : null, sw: sw('full'), title: HS_HINT.full }),
+    kpiTile('Обслуживаются в ЕДЦ', edc ? fmt.int(k.served) : null, edc ? `${fmt.pct(k.servedShare)} домов, без заявок ${fmt.int(k.servedNoReq)}` : 'загрузите выгрузки ЕДЦ', { bar: edc ? k.servedShare : null, sw: sw('full'), title: `${HS_HINT.full} «Без заявок»: обслуживается, но заявок 2026 нет.` }),
     kpiTile('Часть подъездов', edc ? fmt.int(k.hs.partial) : null, edc ? `${fmt.pct(share(k.hs.partial))} домов` : '', { sw: sw('partial'), title: HS_HINT.partial }),
     kpiTile('Не обслуживаются', edc ? fmt.int(k.hs.none) : null, edc ? `${fmt.pct(share(k.hs.none))}, нет в ЕДЦ ${fmt.int(k.notInEdc)}` : '', { sw: sw('none'), title: HS_HINT.none }),
     kpiTile('Подъезды обслуживаются', edc && k.entrTotal ? fmt.pct(k.entrShare) : null, edc ? `${fmt.int(k.entrLinked)} из ${fmt.int(k.entrTotal)}` : '', { bar: edc ? k.entrShare : null }),
@@ -557,6 +557,9 @@ function statusCard(k) {
       h('i', { class: 'sw', style: { background: p.color } }), icon(HS_ICON[p.key], 14),
       h('a', { href: '#houses', onclick: toHouses(p.key) }, p.label),
       h('span', { class: 'num' }, fmt.int(p.value)), h('span', { class: 'num muted' }, fmt.pct(k.mkd ? p.value / k.mkd : null)))),
+    k.servedNoReq ? h('div', { class: 'small', style: { marginTop: '6px' } }, 'Обслуживаются, но заявок 2026 нет: ',
+      h('a', { href: '#houses', onclick: toHouses('served0') }, `${fmt.int(k.servedNoReq)} ${plural(k.servedNoReq, 'дом', 'дома', 'домов')}`),
+      h('span', { class: 'muted' }, ' (на карте кольцом). В карточке такого дома видно, почему: нет обращений или заявки заведены на другую запись ЕДЦ.')) : null,
     k.notInEdc ? h('div', { class: 'small muted', style: { marginTop: '4px' } }, `Из не обслуживаемых домов ${fmt.int(k.notInEdc)} нет в выгрузке ЕДЦ, у остальных ни один подъезд не привязан.`) : null));
   return card;
 }
@@ -787,7 +790,7 @@ function filteredHouses() {
   const max = t.reqMax === '' ? null : Number(t.reqMax);
   const q = app.f.quarter;
   return scopeRows().filter((r) => {
-    if (t.hs && houseStatus(r) !== t.hs) return false;
+    if (t.hs === 'served0') { if (!servedNoRequests(r)) return false; } else if (t.hs && houseStatus(r) !== t.hs) return false;
     if (t.cov) {
       if (t.cov.startsWith('na:')) { if (r.na !== t.cov.slice(3)) return false; } else if (r.cov !== t.cov) return false;
     }
@@ -852,7 +855,7 @@ function renderHouses() {
   const fld = (label, el) => h('div', { class: 'field-inline' }, h('label', null, label), el);
   v.append(h('div', { class: 'filter-bar' },
     fld('Поиск', qInput),
-    fld('Статус', select([['', 'Любой'], ...HS_ORDER.map((k) => [k, HS_LABEL[k]])], t.hs, (x) => set({ hs: x }))),
+    fld('Статус', select([['', 'Любой'], ...HS_ORDER.map((k) => [k, HS_LABEL[k]]), ['served0', 'Обслуживается, но заявок 2026 нет']], t.hs, (x) => set({ hs: x }))),
     fld('Привязка подъездов', select([['', 'Любая'], ...Object.entries(COV_LABEL).map(([k, l]) => [k, l]), ...naOpts], t.cov, (x) => set({ cov: x }))),
     fld('Сопоставление', select([['', 'Любое'], ...Object.entries(MATCH_LABEL).map(([k, l]) => [k, l])], t.match, (x) => set({ match: x }))),
     fld('actual (ЕДЦ)', select([['', 'Любой'], ['true', 'true'], ['false', 'false'], ['null', 'не определено'], ['nodata', 'нет записи ЕДЦ']], t.actual, (x) => set({ actual: x }))),
@@ -997,6 +1000,7 @@ function qualityCard() {
     line('Неактуальные по ЕДЦ', fmt.int(k.na.edc_not_actual || 0), { link: toHouses({ cov: 'na:edc_not_actual' }) }),
     line('Тип ЕДЦ не «Жилое»', fmt.int((k.na.edc_not_residential || 0) + (k.na.edc_type_unknown || 0))),
     line('Без подъездов в ЕДЦ', fmt.int(k.na.no_entrances || 0), { link: toHouses({ cov: 'na:no_entrances' }) }),
+    line('Обслуживаются, но заявок 2026 нет', fmt.int(k.servedNoReq), { link: toHouses({ hs: 'served0' }), hint: 'проверьте в карточке дома' }),
     line('Нет координат', fmt.int(k.mkd - k.geo), { link: toHouses({ geo: 'none' }) }),
   ] : [h('div', { class: 'muted small' }, 'Нет выгрузок ЕДЦ')]));
   const c = st.snapEdc ? st.snapEdc.report?.control || {} : null;

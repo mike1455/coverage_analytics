@@ -3,6 +3,7 @@
 import { h, clear, fmt, NA, na, icon, kv, statusBadge, toast, modal, confirmDialog, plural } from './ui.js';
 import { MATCH_LABEL, NA_REASON, COV_LABEL, classify, houseStatus, HS_HINT } from './analytics.js';
 import { hsBadge } from './charts.js';
+import { prepareAddress } from './core/addrmatch.js';
 import { Q, isIdLabel } from './core/edc.js';
 import { nominatimSearch, accuracyOf, centroidOf } from './geo.js';
 
@@ -66,6 +67,10 @@ export async function openCard(app, u) {
         if (reqBox) reqBox.remove();
       }
       entrBox.replaceWith(entrancesSection(app, row, det));
+      if (det.house && !(det.house.q && det.house.q[Q.total] > 0)) {
+        const why = zeroRequestsSection(app, row, det);
+        body.querySelector('.mini-kpis').after(why);
+      }
     } catch (err) {
       entrBox.replaceWith(sect('Подъезды (ЕДЦ)', null, h('div', { class: 'note error' }, icon('warn'), err.message)));
     }
@@ -191,6 +196,61 @@ function entrancesSection(app, row, det) {
         z ? h('button', { class: 'btn btn-sm btn-ghost', onclick: () => app.deleteZone(z.id) }, 'Удалить зону') : null) : h('span')));
   }
   box.append(list);
+  return box;
+}
+
+// ---------- почему у дома 0 заявок ----------
+/**
+ * Дом обслуживается, а заявок 2026 нет. Три проверки по уже загруженным выгрузкам:
+ * есть ли строка уровня «Дом» в SQL № 4, есть ли заявки по подъездам дома и нет ли у этого же
+ * здания другой записи ЕДЦ (тот же УНОМ или адрес), на которую и заведены заявки.
+ */
+function zeroRequestsSection(app, row, det) {
+  const house = det.house;
+  const aggFound = house.qm === 'Совпало по UUID адреса' || house.qg > 0;
+  const entr = (det.entrances || []).reduce((s, x) => s + (x.q ? x.q[Q.total] : 0), 0);
+  const verdict = h('div', { class: 'note warn' }, icon('help'), h('div', null, 'Проверяю другие записи ЕДЦ...'));
+  const others = h('div', { class: 'stack', style: { gap: '6px' } });
+  const box = sect('Почему у дома 0 заявок', null,
+    kv('Строка уровня «Дом» в SQL № 4', aggFound ? `есть (${fmt.int(house.qg || 1)}), заявок 0` : 'нет: по UUID этого адреса агрегата нет'),
+    kv('Заявки по подъездам дома', `${fmt.int(entr)} (по UUID подъездов)`),
+    verdict, others);
+  const say = (kind, text) => verdict.replaceWith(h('div', { class: `note ${kind}` }, icon(kind === 'ok' ? 'info' : 'warn'), h('div', null, text)));
+  (async () => {
+    const found = new Map();
+    // То же здание: тот же УНОМ или та же улица и тот же номер дома с корпусом и строением
+    const mine = [prepareAddress(house.a), prepareAddress(row.address)].filter((p) => p.bag && p.keys.length);
+    const sameBuilding = (a) => {
+      const p = prepareAddress(a);
+      return p.bag && mine.some((m) => (m.bag === p.bag || m.bagLoose === p.bagLoose) && m.keys.some((k) => p.keys.includes(k)));
+    };
+    // Поиск по главным словам улицы и номеру дома («ленинский 131»), чтобы найти и записи, написанные иначе
+    const short = [...new Set(mine.map((m) => `${m.bagLoose || m.bag} ${(m.keys[0].match(/^\d+/) || [''])[0]}`.trim()))];
+    const queries = [[row.ur, 50, () => true], ...short.map((q) => [q, 500, sameBuilding])];
+    for (const [q, limit, ok] of queries) {
+      if (!q || String(q).trim().length < 2) continue;
+      try {
+        const res = (await app.worker.call('search', { q: String(q), limit })).result;
+        for (const x of res.items) if (x.r !== house.r && x.q0 > 0 && (res.by === 'unom' || ok(x.a))) found.set(x.r, x);
+      } catch (_) { /* поиск недоступен */ }
+    }
+    const list = [...found.values()].sort((a, b) => b.q0 - a.q0).slice(0, 6);
+    if (list.length) {
+      say('error', `Заявки, скорее всего, заведены на другую запись ЕДЦ этого же здания (тот же УНОМ или адрес). В выгрузке ЕДЦ у дома несколько записей: обслуживание настроено на одной, а заявки приходят на другую. Это расхождение в данных ЕДЦ, а не ошибка расчёта.`);
+      for (const x of list) {
+        others.append(h('div', { class: 'cand' },
+          h('div', null, h('b', null, x.a || '(без адреса)'),
+            h('div', { class: 'meta' }, `УНОМ ${x.ur || NA}, ${x.ht || 'тип не указан'}, actual=${x.ac}, подъездов ${fmt.int(x.et)}, заявок 2026: `, h('b', null, fmt.int(x.q0)))),
+          h('button', { class: 'btn btn-sm', onclick: () => openEdcCard(app, x.r) }, 'Открыть')));
+      }
+    } else if (entr > 0) {
+      say('error', `По подъездам этого дома в SQL № 4 есть ${fmt.int(entr)} заявок, а строки уровня «Дом» нет. Выгрузка заявок неполная: уровень «Дом» в SQL № 4 должен считать все заявки адреса.`);
+    } else if (aggFound) {
+      say('ok', 'Строка по дому в SQL № 4 есть, в ней 0 заявок за 2026 год. Обслуживание настроено, но жители через ЕДЦ в этом году не обращались.');
+    } else {
+      say('ok', 'В SQL № 4 нет ни строки по этому адресу, ни заявок по его подъездам, и других записей ЕДЦ с заявками для этого УНОМ и адреса нет. Скорее всего, в 2026 году заявок по дому не было. «Обслуживается» означает, что в ЕДЦ настроено обслуживание (организации и привязанные подъезды), а не что по дому есть заявки.');
+    }
+  })();
   return box;
 }
 

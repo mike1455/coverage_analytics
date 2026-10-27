@@ -3,7 +3,7 @@
 // На карту попадают ТОЛЬКО дома с сохранённой геопозицией - без случайных или «примерных» точек.
 
 import { h, clear, fmt, NA, icon } from './ui.js';
-import { houseStatus, HS_LABEL, HS_ORDER, metricValue, METRICS, quantileBreaks, classOf } from './analytics.js';
+import { houseStatus, servedNoRequests, HS_LABEL, HS_ORDER, metricValue, METRICS, quantileBreaks, classOf } from './analytics.js';
 import { okrugByCode } from './core/okrugs.js';
 import { rampResolved, rampSteps, fmtMetric, cssVar, HS_ICON } from './charts.js';
 import { basemapState, basemapShort, onBasemap, startBasemapDownload } from './basemap.js';
@@ -241,6 +241,8 @@ export class MapView {
       n++;
       const st = houseStatus(r);
       this.counts[st] = (this.counts[st] || 0) + 1;
+      const quiet = servedNoRequests(r); // обслуживается, а заявок нет: кольцо вместо закрашенной точки
+      if (quiet) this.counts.quiet = (this.counts.quiet || 0) + 1;
       const target = st === 'excluded' ? this.groups.excluded : this.groups.houses;
       const color = c[st] || c.unknown;
       if (g.building && this.layerOn.buildings) {
@@ -251,11 +253,13 @@ export class MapView {
           .addTo(st === 'excluded' ? this.groups.excluded : this.groups.buildings);
       }
       if (this.layerOn.houses) {
-        L.circleMarker([g.lat, g.lon], {
+        L.circleMarker([g.lat, g.lon], quiet ? {
+          renderer: this.renderer, radius, weight: Math.max(2, weight + 1), color, fillColor: c.surface, fillOpacity: 1,
+        } : {
           renderer: this.renderer, radius, weight, color: c.surface, fillColor: color, fillOpacity: 1,
           dashArray: st === 'excluded' ? '2 2' : null,
         }).on('click', () => this.cb.onHouse(r.u))
-          .bindTooltip(() => h('div', null, h('b', null, r.address), h('div', null, HS_LABEL[st]),
+          .bindTooltip(() => h('div', null, h('b', null, r.address), h('div', null, HS_LABEL[st], quiet ? ', заявок 2026 нет' : ''),
             r.e && r.e.et ? h('div', { class: 'muted' }, `Подъездов обслуживается: ${fmt.int(Math.min(r.e.el, r.e.et))} из ${fmt.int(r.e.et)}`) : null,
             r.q ? h('div', { class: 'muted' }, `Заявок 2026: ${fmt.int(r.q[0])}`) : null,
             g.status === 'verified' || g.status === 'manual' ? null : h('div', { class: 'muted' }, `Геопозиция: ${g.accuracy || 'не проверена'}`)), { direction: 'top', offset: [0, -6] })
@@ -342,6 +346,9 @@ export class MapView {
       if (!counts[k] && (k === 'unknown' || k === 'excluded')) continue;
       el.append(h('div', { class: 'lg-row' }, h('i', { class: 'sw', style: { background: `var(--hs-${k})` } }),
         icon(HS_ICON[k], 14), HS_LABEL[k], h('span', { class: 'n' }, fmt.int(counts[k] || 0))));
+      if (k === 'partial' && counts.quiet) {
+        el.append(h('div', { class: 'lg-row' }, h('i', { class: 'sw ring' }), h('span', { class: 'lg-ind' }), 'Обслуживается, но заявок 2026 нет (кольцо)', h('span', { class: 'n' }, fmt.int(counts.quiet))));
+      }
     }
     const sc = this.scales.area || this.scales.okrug;
     if (sc) {

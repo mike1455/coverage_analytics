@@ -82,6 +82,9 @@ export function houseStatus(row) {
 
 export const isServed = (s) => s === 'full' || s === 'partial';
 
+/** Обслуживается, но заявок 2026 года по дому нет (стоит проверить: нет обращений или заявки на другой записи ЕДЦ). */
+export const servedNoRequests = (row) => isServed(houseStatus(row)) && !(row.q && row.q[Q.total] > 0);
+
 /**
  * Краткая сводка записи ЕДЦ для кэша сопоставления (таблицы, фильтры, KPI, экспорт).
  * Полную запись карточка дома запрашивает у worker отдельно, поэтому кэш остаётся компактным.
@@ -354,6 +357,7 @@ export function finalizeKpi(k) {
   k.notServedShare = k.hasEdc && k.mkd ? k.hs.none / k.mkd : null;
   k.partialShare = k.hasEdc && k.mkd ? k.hs.partial / k.mkd : null;
   k.activeShare = k.served ? k.servedActive / k.served : null;
+  k.servedNoReq = k.served - k.servedActive;
   return k;
 }
 

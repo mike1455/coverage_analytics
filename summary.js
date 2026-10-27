@@ -151,7 +151,7 @@ export function buildPoster(data, o) {
   const conn = data.hasEdc;
   const tiles = [
     ['Домов в реестре МЖИ', fmt.int(k.mkd), `${data.okrugs.size - (data.okrugs.has(NO_OKRUG) ? 1 : 0)} округов, ${data.areas.length} районов и поселений`, null, null],
-    ['Обслуживаются в ЕДЦ', conn ? fmt.int(k.served) : 'нет данных', conn ? `${fmt.pct(k.servedShare)} домов реестра` : 'загрузите выгрузки ЕДЦ', conn ? k.servedShare : null, T.hs.full],
+    ['Обслуживаются в ЕДЦ', conn ? fmt.int(k.served) : 'нет данных', conn ? `${fmt.pct(k.servedShare)} домов, без заявок 2026: ${fmt.int(k.servedNoReq)}` : 'загрузите выгрузки ЕДЦ', conn ? k.servedShare : null, T.hs.full],
     ['Обслуживается часть подъездов', conn ? fmt.int(k.hs.partial) : 'нет данных', conn ? `${fmt.pct(k.partialShare)} домов реестра` : '', null, T.hs.partial],
     ['Не обслуживаются в ЕДЦ', conn ? fmt.int(k.hs.none) : 'нет данных', conn ? `${fmt.pct(k.notServedShare)}, из них нет в ЕДЦ ${fmt.int(k.notInEdc)}` : '', null, T.hs.none],
     ['Заявок в 2026 году', conn ? fmt.big(k.req.total) : 'нет данных', conn ? `${fmt.num1(metricValue(k, 'reqPerHouse'))} на дом, заявки у ${fmt.pct(k.activeShare, 0)} домов` : '', null, null],

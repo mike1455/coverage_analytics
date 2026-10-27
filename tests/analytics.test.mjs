@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   pickCandidate, classify, Joiner, kpiOf, groupKpi, rankGroups, reqValue, hexCells, MIN_SAMPLE,
-  houseStatus, metricValue, quantileBreaks, classOf,
+  houseStatus, servedNoRequests, metricValue, quantileBreaks, classOf,
 } from '../analytics.js';
 
 const q = (total, extra = {}) => { const a = new Array(10).fill(0); a[0] = total; a[2] = extra.open || 0; a[3] = extra.critical || 0; a[6] = extra.q1 || 0; a[9] = extra.q4 || 0; return a; };
@@ -139,6 +139,8 @@ test('статус дома: обслуживается (зелёный), час
   assert.equal(k.notInEdc, 1);
   assert.equal(k.servedShare, 3 / 8);
   assert.equal(k.activeShare, 1 / 3);
+  assert.equal(k.servedNoReq, 2, 'обслуживаются, но заявок нет');
+  assert.deepEqual(rows.map(servedNoRequests), [false, true, false, false, false, false, true, false]);
   assert.equal(metricValue(k, 'reqPerHouse'), 5 / 3, 'заявки неактуального дома не входят в «на дом»');
   assert.equal(metricValue(k, 'reqPerHouse', 'q1'), 2 / 3);
   assert.equal(metricValue(k, 'requests'), 12, 'всего заявок: все сопоставленные дома');

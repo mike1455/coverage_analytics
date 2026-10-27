@@ -423,6 +423,17 @@ function prepareSourceFolder() {
     await page.waitForTimeout(500);
     await page.screenshot({ path: join(OUT, '08_card.png') });
     await page.click('.drawer.open .drawer-head .icon-btn');
+    // Дом обслуживается, а заявок нет: карточка объясняет почему
+    await page.selectOption('#view-houses select:near(:text("Статус"))', 'served0');
+    await page.waitForTimeout(300);
+    await page.click('#view-houses tbody tr.clickable');
+    await page.waitForSelector('.drawer.open .sect:has-text("Почему у дома 0 заявок")', { timeout: 10000 });
+    await page.waitForFunction(() => !/Проверяю другие записи/.test(document.querySelector('.drawer.open').innerText), null, { timeout: 10000 });
+    const why = await page.evaluate(() => [...document.querySelectorAll('.drawer.open .sect')].find((x) => /Почему у дома 0 заявок/.test(x.innerText)).innerText);
+    assert.match(why, /SQL № 4/);
+    await page.screenshot({ path: join(OUT, '08b_card_zero_requests.png') });
+    await page.click('.drawer.open .drawer-head .icon-btn');
+    await page.selectOption('#view-houses select:near(:text("Статус"))', '');
     await page.click('.nav-item[data-view="import"]');
     await page.waitForTimeout(500);
     await page.screenshot({ path: join(OUT, '09_import_quality.png'), fullPage: true });

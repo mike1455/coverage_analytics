@@ -76,6 +76,7 @@ export function buildWorkbook({ rows, geo, scope, dates }) {
     line('Домов в реестре МЖИ', k.mkd),
     line(HS_LABEL.full, k.hs.full, 'int', HS_HINT.full),
     line(HS_LABEL.partial, k.hs.partial, 'int', HS_HINT.partial),
+    line('Обслуживаются, но заявок 2026 нет', k.servedNoReq, 'int', 'Обслуживание настроено, а заявок по дому нет: нет обращений или заявки заведены на другую запись ЕДЦ.'),
     line(HS_LABEL.none, k.hs.none, 'int', HS_HINT.none),
     line('из них нет в ЕДЦ', k.notInEdc),
     line(HS_LABEL.unknown, k.hs.unknown, 'int', HS_HINT.unknown),
